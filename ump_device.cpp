@@ -249,14 +249,14 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
 
   TU_VERIFY(ump->ep_out);
 
-  while (numRead < numAvail &&
-    tu_fifo_peek_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
+  // If USB MIDI 1.0, then convert
+  if ( ump->ump_interface_selected != 1 )
   {
     // Note if data processed
     umpPacket.wordCount = 0;
 
-    // If USB MIDI 1.0, then convert
-    if ( ump->ump_interface_selected != 1 )
+    while (numRead < numAvail &&
+      tu_fifo_peek_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
     {
       // Determine packet cable number from group
       uint8_t cbl_num = (readStream.buffer[0] & 0xf0) >> 4;
@@ -466,7 +466,11 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
         pkts[numRead++] = umpPacket.umpData.umpWords[pktCount];
       }
     }
-    else
+  }
+  else
+  {
+    while (numRead < numAvail &&
+      tu_fifo_read_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
     {
       pkts[numRead++] = *(uint32_t *)&readStream.buffer;
     }
@@ -533,68 +537,69 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
 
   TU_VERIFY(ump->ep_out);
   uint16_t numProcessed = 0;
-  UMP_PACKET umpPacket;
-  UMP_PACKET umpWritePacket;  // used as storage to translate to USB MIDI 1.0
-
-  umpPacket.wordCount = 0;
 
   // As long as there is data to process and room to write into fifo
   while (numProcessed < numWords)
   {
-    // First determine the size of UMP packet based on message type
-    umpPacket.umpData.umpWords[0] = words[numProcessed];
-    switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
-    {
-      case UMP_MT_UTILITY :
-      case UMP_MT_SYSTEM :
-      case UMP_MT_MIDI1_CV :
-      case 0x60 : // undefined
-      case 0x70 : // undefined
-        umpPacket.wordCount = 1;
-        break;
-
-      case UMP_MT_DATA_64 :
-      case UMP_MT_MIDI2_CV :
-      case 0x80 : // undefined
-      case 0x90 : // undefined
-      case 0xa0 : // undefined
-        umpPacket.wordCount = 2;
-        break;
-
-      case 0xb0 : // undefined
-      case 0xc0 : // undefined
-        umpPacket.wordCount = 3;
-        break;
-
-      case UMP_MT_DATA_128 :
-      case UMP_MT_FLEX_128 :
-      case UMP_MT_STREAM_128 :
-      case 0xe0 : // undefined
-        umpPacket.wordCount = 4;
-        break;
-
-      default :
-        // Unhandled or corrupt data, force to move on
-        numProcessed++;
-        continue;
-    }
-
-    // Confirm have enough data for full packet
-    if ((numWords - numProcessed) < umpPacket.wordCount)
-    {
-      // If not, let system populate more
-      goto exitWrite;
-    }
-    // Get rest of words if needed for UMP Packet
-    for (int count = 1; count < umpPacket.wordCount; count++)
-    {
-      umpPacket.umpData.umpWords[count] = words[numProcessed+count];
-    }
-
-    // Process UMP Packet
+        // Process UMP Packet
     // Convert to USB MIDI 1.0?
     if ( ump->ump_interface_selected != 1 )
     {
+      UMP_PACKET umpPacket;
+      UMP_PACKET umpWritePacket;  // used as storage to translate to USB MIDI 1.0
+
+      umpPacket.wordCount = 0;
+
+      // First determine the size of UMP packet based on message type
+      umpPacket.umpData.umpWords[0] = words[numProcessed];
+      switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
+      {
+        case UMP_MT_UTILITY :
+        case UMP_MT_SYSTEM :
+        case UMP_MT_MIDI1_CV :
+        case 0x60 : // undefined
+        case 0x70 : // undefined
+          umpPacket.wordCount = 1;
+          break;
+
+        case UMP_MT_DATA_64 :
+        case UMP_MT_MIDI2_CV :
+        case 0x80 : // undefined
+        case 0x90 : // undefined
+        case 0xa0 : // undefined
+          umpPacket.wordCount = 2;
+          break;
+
+        case 0xb0 : // undefined
+        case 0xc0 : // undefined
+          umpPacket.wordCount = 3;
+          break;
+
+        case UMP_MT_DATA_128 :
+        case UMP_MT_FLEX_128 :
+        case UMP_MT_STREAM_128 :
+        case 0xe0 : // undefined
+          umpPacket.wordCount = 4;
+          break;
+
+        default :
+          // Unhandled or corrupt data, force to move on
+          numProcessed++;
+          continue;
+      }
+
+      // Confirm have enough data for full packet
+      if ((numWords - numProcessed) < umpPacket.wordCount)
+      {
+        // If not, let system populate more
+        goto exitWrite;
+      }
+      // Get rest of words if needed for UMP Packet
+      for (int count = 1; count < umpPacket.wordCount; count++)
+      {
+        umpPacket.umpData.umpWords[count] = words[numProcessed+count];
+      }
+
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK; // if used, cable num is group block num
 
       switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
@@ -758,13 +763,10 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
     }
     else
     {
-      if ((tu_fifo_remaining(&ump->tx_ff) / 4) < umpPacket.wordCount)
-      {
-        goto exitWrite;
-      }
-
-      tu_fifo_write_n(&ump->tx_ff, (void*)&umpPacket.umpData, umpPacket.wordCount*4);
-      numProcessed += umpPacket.wordCount;
+      // Should already be UMP formatted, so just pass along
+      uint16_t numAvailable = tu_fifo_remaining(&ump->tx_ff) / 4;
+      numProcessed = (numAvailable < numWords) ? numAvailable : numWords;
+      tu_fifo_write_n(&ump->tx_ff, (void*)words, numProcessed*4);
     }
   }
 
