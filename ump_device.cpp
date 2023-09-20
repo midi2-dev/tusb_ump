@@ -95,18 +95,21 @@ usbd_class_driver_t const* usbd_app_driver_get_cb(uint8_t* driver_count)
 //--------------------------------------------------------------------+
 typedef struct
 {
-  uint8_t buffer[4];
+  union{
+    uint32_t  word;
+    uint8_t   bytes[4];
+  } buffer;
   uint8_t index;
 }midid_stream_t;
 
 typedef struct
 {
-  uint8_t   wordCount;
   union ump_device
   {
     uint32_t  umpWords[4];
     uint8_t   umpBytes[sizeof(uint32_t)*4];
   } umpData;
+  uint8_t   wordCount;
 } UMP_PACKET;
 
 #define MAX_NUM_GROUPS_CABLES 16
@@ -256,18 +259,18 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
     umpPacket.wordCount = 0;
 
     while (numRead < numAvail &&
-      tu_fifo_peek_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
+      tu_fifo_peek_n(&ump->rx_ff, readStream.buffer.bytes, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
     {
       // Determine packet cable number from group
-      uint8_t cbl_num = (readStream.buffer[0] & 0xf0) >> 4;
+      uint8_t cbl_num = (readStream.buffer.bytes[0] & 0xf0) >> 4;
 
       // ***Process data into MIDI1 data format***
-      uint8_t code_index = readStream.buffer[0] & 0x0f;
+      uint8_t code_index = readStream.buffer.bytes[0] & 0x0f;
 
       // Handle special case of single byte data
-      if (code_index == MIDI_CIN_1BYTE_DATA && (readStream.buffer[1]&0x80))
+      if (code_index == MIDI_CIN_1BYTE_DATA && (readStream.buffer.bytes[1]&0x80))
       {
-        switch (readStream.buffer[1])
+        switch (readStream.buffer.bytes[1])
         {
           case UMP_SYSTEM_TUNE_REQ :
           case UMP_SYSTEM_TIMING_CLK :
@@ -304,7 +307,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           // Copy in rest of data
           for (int count=1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count+1] = readStream.buffer.bytes[count];
           }
           // Pad rest of data
           umpPacket.umpData.umpBytes[5] = 0x00;
@@ -316,11 +319,11 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
 
         case MIDI_CIN_SYSEX_END_1BYTE : // or single byte System Common
           // Determine if a system common
-          if ((readStream.buffer[1] & 0x80) // most significant bit set and not sysex
-            && (readStream.buffer[1] != MIDI_STATUS_SYSEX_END))
+          if ((readStream.buffer.bytes[1] & 0x80) // most significant bit set and not sysex
+            && (readStream.buffer.bytes[1] != MIDI_STATUS_SYSEX_END))
           {
             umpPacket.umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
-            umpPacket.umpData.umpBytes[1] = readStream.buffer[1];
+            umpPacket.umpData.umpBytes[1] = readStream.buffer.bytes[1];
             umpPacket.umpData.umpBytes[2] = 0x00;
             umpPacket.umpData.umpBytes[3] = 0x00;
             umpPacket.wordCount = 1;
@@ -349,7 +352,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
           for (int count=1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count+1] = readStream.buffer.bytes[count];
           }
           
           umpPacket.wordCount = 2;
@@ -378,7 +381,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
           for (int count=1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count+1] = readStream.buffer.bytes[count];
           }
           // Pad rest of data
           umpPacket.umpData.umpBytes[6]  = 0x00;
@@ -410,7 +413,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
           for (int count=1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count+1] = readStream.buffer.bytes[count];
           }
           // Pad rest of data
           umpPacket.umpData.umpBytes[6]  = 0x00;
@@ -433,7 +436,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           // Copy in rest of data
           for (int count=1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count] = readStream.buffer.bytes[count];
           }
 
           umpPacket.wordCount = 1;
@@ -444,7 +447,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
           umpPacket.umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
           for (int count = 1; count < 4; count++)
           {
-            umpPacket.umpData.umpBytes[count] = readStream.buffer[count];
+            umpPacket.umpData.umpBytes[count] = readStream.buffer.bytes[count];
           }
           umpPacket.wordCount = 1;
           break;
@@ -458,10 +461,10 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
       }
 
       // Assuming Data processed so read in packet to clear from FIFO
-      tu_fifo_read_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer));
+      tu_fifo_read_n(&ump->rx_ff, readStream.buffer.bytes, sizeof(readStream.buffer));
 
       // write to packets
-      for (int pktCount = 0; pktCount < umpPacket.wordCount; pktCount++)
+      for (uint32_t pktCount = 0; pktCount < umpPacket.wordCount; pktCount++)
       {
         pkts[numRead++] = umpPacket.umpData.umpWords[pktCount];
       }
@@ -470,9 +473,9 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
   else
   {
     while (numRead < numAvail &&
-      tu_fifo_read_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
+      tu_fifo_read_n(&ump->rx_ff, readStream.buffer.bytes, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
     {
-      pkts[numRead++] = *(uint32_t *)&readStream.buffer;
+      pkts[numRead++] = readStream.buffer.word;
     }
   }
 
@@ -589,7 +592,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       }
 
       // Confirm have enough data for full packet
-      if ((numWords - numProcessed) < umpPacket.wordCount)
+      if ((uint32_t)(numWords - numProcessed) < umpPacket.wordCount)
       {
         // If not, let system populate more
         goto exitWrite;
@@ -691,30 +694,30 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
           uint8_t sysexWordCount = 0;
           while( sysexCount < sysexSize && sysexWordCount < numWordsNeeded )
           {
-            ump->midi1OutSysex[cbl_num].buffer[ump->midi1OutSysex[cbl_num].index++] = umpPacket.umpData.umpBytes[2+sysexCount++];
+            ump->midi1OutSysex[cbl_num].buffer.bytes[ump->midi1OutSysex[cbl_num].index++] = umpPacket.umpData.umpBytes[2+sysexCount++];
 
             // is current packet build full
             if (ump->midi1OutSysex[cbl_num].index == 4)
             {
-              ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4);
+              ump->midi1OutSysex[cbl_num].buffer.bytes[0] = (cbl_num << 4);
               if (bEndSysex)
               {
                 if (sysexCount == sysexSize)
                 {
-                   ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_END_3BYTE;
+                   ump->midi1OutSysex[cbl_num].buffer.bytes[0] |= MIDI_CIN_SYSEX_END_3BYTE;
                 }
                 else
                 {
-                   ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_START;
+                   ump->midi1OutSysex[cbl_num].buffer.bytes[0] |= MIDI_CIN_SYSEX_START;
                 }
               }
               else
               {
-                ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_START;
+                ump->midi1OutSysex[cbl_num].buffer.bytes[0] |= MIDI_CIN_SYSEX_START;
               }
 
               // Fill Word into write packet and reset index
-              umpWritePacket.umpData.umpWords[sysexWordCount++] = *(uint32_t *)&ump->midi1OutSysex[cbl_num].buffer;
+              umpWritePacket.umpData.umpWords[sysexWordCount++] = ump->midi1OutSysex[cbl_num].buffer.word;
               ump->midi1OutSysex[cbl_num].index = 1;
             }
           }
@@ -725,25 +728,25 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
             // Fill rest of buffer
             while(ump->midi1OutSysex[cbl_num].index < 4) // WRONG LOGIC HERE
             {
-              ump->midi1OutSysex[cbl_num].buffer[ump->midi1OutSysex[cbl_num].index++] = 0x00;
+              ump->midi1OutSysex[cbl_num].buffer.bytes[ump->midi1OutSysex[cbl_num].index++] = 0x00;
             }
             switch (numBytesRemain)
             {
               case 1 :
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
+                ump->midi1OutSysex[cbl_num].buffer.bytes[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
                 break;
               
               case 2 :
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_2BYTE;
+                ump->midi1OutSysex[cbl_num].buffer.bytes[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_2BYTE;
                 break;
 
               default :
                 // should never get here, but use full packet in error
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_3BYTE;
+                ump->midi1OutSysex[cbl_num].buffer.bytes[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_3BYTE;
             }
 
             // Fill Word into write packet
-            umpWritePacket.umpData.umpWords[sysexWordCount++] = *(uint32_t *)&ump->midi1OutSysex[cbl_num].buffer;
+            umpWritePacket.umpData.umpWords[sysexWordCount++] = ump->midi1OutSysex[cbl_num].buffer.word;
             ump->midi1OutSysex[cbl_num].index = 1;
           }
           break;
