@@ -18,7 +18,19 @@ TODO: Example code and integration guide will be provided
 
 ## UMP to USB MIDI 1.0
 
+When the host computer initializes the device as a USB MIDI 1.0 device, the UMP packets from embedded applications need to be converted to USB MIDI 1.0 packets to send to host computer. This is achieved by the following translation logic:
+
+<img src="doc/images/UMPtoUSBMIDI1_0.png"
+     alt="UMP to USB MIDI 1.0 Flowchart"
+     style="center; margin-right: 100px;" />
+
 ## USB MIDI 1.0 to UMP
+
+Similarly, when initialized as a USB MIDI 1.0 device, the data from the host computer needs to be converted to UMP packets for presentation to the embedded applications. This is achieved b y the following translation logic:
+
+<img src="doc/images/USBMIDI1_0toUMP.png"
+     alt="UMP to USB MIDI 1.0 Flowchart"
+     style="center; margin-right: 100px;" />
 
 ## MIDI Association ([www.midi.org](http://www.midi.org))
 These drivers were developed and tested in conjunction of the ProtoZOA <sup>TM</sup> MIDI 2.0 Prototyping tool which was developed to support the MIDI Association towards their mission for corporate members to:
@@ -62,6 +74,12 @@ We wish to thank and acknowledge all contributors to this project. In particular
 | Mike Kent    | AmeNote    | [mikekent@AmeNote.com](mailto:mikekent@AmeNote.com)    | Concept, Architecture, MIDI 2.0 Technical Support.    |
 | Andrew Mee    | AmeNote (consultant)    | [primary.edw@gmail.com ](mailto:primary.edw@gmail.com)   | Various firmware integration, MIDI 2.0 and UMP libraries, Capability Inquiry, MIDI 2.0 Technical support, testing.    |
 | Franz Detro | Native Instruments | [franz.detro@native-instruments.de](mailto:franz.detro@native-instruments.de) | Inputs into usb midi 2.0 class driver to clean up descriptors and control endpoint sync. |
+
+## Contributing
+
+We invite for collaborative and constructive contributions. You can contribute by submitting detailed information in Issues for requests for features and bugs. We also welcome contributions of code.
+
+TODO: Contribution agreement.
 
 ##### AmeNote, AmeNote Logo and ProtoZOA are trademarks of AmeNote Inc.
 ##### Copyright (c) MIDI2.dev, 2023.
