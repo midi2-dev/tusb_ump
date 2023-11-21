@@ -463,7 +463,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
       // write to packets
       for (int pktCount = 0; pktCount < umpPacket.wordCount; pktCount++)
       {
-        pkts[numRead++] = umpPacket.umpData.umpWords[pktCount];
+        pkts[numRead++] = tu_u32(U32_TO_U8S_LE(umpPacket.umpData.umpWords[pktCount]));
       }
     }
   }
@@ -551,7 +551,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       umpPacket.wordCount = 0;
 
       // First determine the size of UMP packet based on message type
-      umpPacket.umpData.umpWords[0] = words[numProcessed];
+      umpPacket.umpData.umpWords[0] = tu_u32(U32_TO_U8S_LE(words[numProcessed]));
       switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
       {
         case UMP_MT_UTILITY :
@@ -597,7 +597,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       // Get rest of words if needed for UMP Packet
       for (int count = 1; count < umpPacket.wordCount; count++)
       {
-        umpPacket.umpData.umpWords[count] = words[numProcessed+count];
+        umpPacket.umpData.umpWords[count] = tu_u32(U32_TO_U8S_LE(words[numProcessed+count]));
       }
 
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK; // if used, cable num is group block num
