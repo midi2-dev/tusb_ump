@@ -93,11 +93,11 @@ TU_ATTR_WEAK bool tud_ump_get_req_itf_cb(uint8_t rhport, tusb_control_request_t 
 // Internal Class Driver API
 //--------------------------------------------------------------------+
 void     umpd_init            (void);
+bool     umpd_deinit          (void);
 void     umpd_reset           (uint8_t rhport);
 uint16_t umpd_open            (uint8_t rhport, tusb_desc_interface_t const * itf_desc, uint16_t max_len);
 bool     umpd_control_xfer_cb (uint8_t rhport, uint8_t stage, tusb_control_request_t const * request);
 bool     umpd_xfer_cb         (uint8_t rhport, uint8_t edpt_addr, xfer_result_t result, uint32_t xferred_bytes);
-
 #ifdef __cplusplus
  }
 #endif

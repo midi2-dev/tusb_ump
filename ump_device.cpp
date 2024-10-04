@@ -19,6 +19,9 @@
  *   USB MIDI 1.0 and USB MIDI 2.0. Remove dependance on external libraries.
  * UMP Driver Version 0.5 - Sept. 18, 2023
  * - bug fixes, USB MIDI 1.0 SYSEX on USB IN and USB OUT.
+ * UMP Driver Version 1.0 - Sept. 26, 2024
+ * - handling of USB MIDI 1.0 SYSEX translation
+ * - Update of driver to latest tinyUSB implementation requirements
  *
  * The driver is backwards compatible with USB MIDI 1.0 if connected to an
  * operating system or other USB Hosting that does not support USB MIDI 2.0.
@@ -65,7 +68,13 @@
 #define TUSB_NUM_APP_DRIVERS 1  // defines number of app drivers
 usbd_class_driver_t const tusb_app_drivers[TUSB_NUM_APP_DRIVERS] = {
   {
+#if TUSB_VERSION_MAJOR == 0 && TUSB_VERSION_MINOR > 16
+    "UMP",
+#endif
     umpd_init,            // Driver init function
+#if TUSB_VERSION_MAJOR == 0 && TUSB_VERSION_MINOR > 16
+    umpd_deinit,          // Driver deinit function
+#endif
     umpd_reset,           // Driver reset function
     umpd_open,            // Driver open function
     umpd_control_xfer_cb, // Driver control transfer callback function
@@ -107,7 +116,19 @@ typedef struct
     uint32_t  umpWords[4];
     uint8_t   umpBytes[sizeof(uint32_t)*4];
   } umpData;
-} UMP_PACKET;
+} UMP_PACKET, *PUMP_PACKET;
+
+//
+// Structure to aid in UMP SYSEX to USB MIDI 1.0
+//
+#define SYSEX_BS_RB_SIZE 16
+typedef struct UMP_TO_MIDI1_SYSEX_t
+{
+    bool    inSysex;
+    uint8_t sysexBS[SYSEX_BS_RB_SIZE];
+    uint8_t usbMIDI1Tail;
+    uint8_t usbMIDI1Head;
+} UMP_TO_MIDI1_SYSEX;
 
 #define MAX_NUM_GROUPS_CABLES 16
 
@@ -118,7 +139,7 @@ typedef struct
   uint8_t ep_out;
 
   bool midi1IsInSysex[MAX_NUM_GROUPS_CABLES];
-  midid_stream_t midi1OutSysex[MAX_NUM_GROUPS_CABLES];
+  UMP_TO_MIDI1_SYSEX midi1OutSysex[MAX_NUM_GROUPS_CABLES];
 
   /*------------- From this point, data is not cleared by bus reset -------------*/
   // FIFO
@@ -173,6 +194,21 @@ CFG_TUSB_MEM_SECTION umpd_interface_t _umpd_itf[CFG_TUD_UMP];
 
 extern "C"
 {
+inline uint32_t RtlUlongByteSwap(uint32_t wordToSwap)
+{
+  uint8_t *pFrom = (uint8_t *)&wordToSwap;
+  uint32_t returnVal = 0;
+  uint8_t *pTo = (uint8_t *)&returnVal;
+
+  pTo[0] = pFrom[3];
+  pTo[1] = pFrom[2];
+  pTo[2] = pFrom[1];
+  pTo[3] = pFrom[0];
+
+  return returnVal;
+}
+
+bool     tud_USBMIDI1ToUMP    (uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMP_PACKET umpPkt);
 
 bool tud_ump_n_mounted (uint8_t itf)
 {
@@ -223,7 +259,7 @@ uint32_t tud_ump_n_available(uint8_t itf)
  * @param itf       interface number
  * @return bool true if enabled
  */
-uint8_t tud_alt_setting( uint8_t itf) {
+uint8_t tud_alt_setting( uint8_t itf) { 
     umpd_interface_t* ump = &_umpd_itf[itf];
     return ump->ump_interface_selected;
 }
@@ -244,238 +280,53 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
-  midid_stream_t readStream;
-  UMP_PACKET umpPacket;
+  uint16_t numProcessed = 0;
+
+  static UMP_PACKET umpPacket;
 
   TU_VERIFY(ump->ep_out);
 
-  // If USB MIDI 1.0, then convert
-  if ( ump->ump_interface_selected != 1 )
+  // Determine if MIDI 1
+  if (!ump->ump_interface_selected)
   {
-    // Note if data processed
-    umpPacket.wordCount = 0;
-
-    while (numRead < numAvail &&
-      tu_fifo_peek_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
+    // Always look for enough space to process in a SYSEX message
+    while ((numAvail - numProcessed) >= 2)
     {
-      // Determine packet cable number from group
-      uint8_t cbl_num = (readStream.buffer[0] & 0xf0) >> 4;
-
-      // ***Process data into MIDI1 data format***
-      uint8_t code_index = readStream.buffer[0] & 0x0f;
-
-      // Handle special case of single byte data
-      if (code_index == MIDI_CIN_1BYTE_DATA && (readStream.buffer[1]&0x80))
+      // Get next word from USB
+      uint32_t readWord;
+      if (tu_fifo_read_n(&ump->rx_ff, (void *)&readWord, sizeof(uint32_t)) != sizeof(uint32_t) )
       {
-        switch (readStream.buffer[1])
+        goto END_READ;
+      }
+      numProcessed++;
+
+      if (readWord)
+      {
+        uint8_t *pBuffer = (uint8_t *)&readWord;
+        uint8_t cbl_num = (pBuffer[0] & 0xf0) >> 4;
+        UMP_PACKET pkt;
+        if (tud_USBMIDI1ToUMP(readWord, &ump->midi1IsInSysex[cbl_num], &pkt))
         {
-          case UMP_SYSTEM_TUNE_REQ :
-          case UMP_SYSTEM_TIMING_CLK :
-          case UMP_SYSTEM_START :
-          case UMP_SYSTEM_CONTINUE :
-          case UMP_SYSTEM_STOP :
-          case UMP_SYSTEM_ACTIVE_SENSE :
-          case UMP_SYSTEM_RESET :
-            code_index = MIDI_CIN_SYSEX_END_1BYTE;
-            break;
-          
-          default:
-            break;
+          for (uint8_t count = 0; count < pkt.wordCount; count++)
+          {
+            pkts[numRead++] = pkt.umpData.umpWords[count];
+          }
         }
-      }
-
-      switch (code_index)
-      {
-        case MIDI_CIN_SYSEX_START :
-          // Needs more space, confirm available
-          if (!(numRead + 1 < numAvail))
-          {
-            continue;
-          }
-
-          umpPacket.umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;   // Message Type and group
-
-          // As this is start of SYSEX, need to set status to indicate so and copy 3 bytes of data
-          umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_START | 3;
-
-          // Set that in SYSEX
-          ump->midi1IsInSysex[cbl_num] = true;
-
-          // Copy in rest of data
-          for (int count=1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
-          }
-          // Pad rest of data
-          umpPacket.umpData.umpBytes[5] = 0x00;
-          umpPacket.umpData.umpBytes[6]  = 0x00;
-          umpPacket.umpData.umpBytes[7] = 0x00;
-
-          umpPacket.wordCount = 2;
-          break;
-
-        case MIDI_CIN_SYSEX_END_1BYTE : // or single byte System Common
-          // Determine if a system common
-          if ((readStream.buffer[1] & 0x80) // most significant bit set and not sysex
-            && (readStream.buffer[1] != MIDI_STATUS_SYSEX_END))
-          {
-            umpPacket.umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
-            umpPacket.umpData.umpBytes[1] = readStream.buffer[1];
-            umpPacket.umpData.umpBytes[2] = 0x00;
-            umpPacket.umpData.umpBytes[3] = 0x00;
-            umpPacket.wordCount = 1;
-            break;
-          }
-
-          // Sysex so 64 bit message Needs more space, confirm available
-          if (!(numRead + 1 < numAvail))
-          {
-            return numRead;
-          }
-
-          umpPacket.umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
-
-          // Determine if complete based on if currently in SYSEX
-          if ( ump->midi1IsInSysex[cbl_num] )
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_END | 1;
-            ump->midi1IsInSysex[cbl_num] = false; // we are done with SYSEX
-          }
-          else
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 1;
-          }
-
-          // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
-          for (int count=1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
-          }
-          
-          umpPacket.wordCount = 2;
-          break;
-
-        case MIDI_CIN_SYSEX_END_2BYTE :
-          // Needs more space, confirm available
-          if (!(numRead + 1 < numAvail))
-          {
-            return numRead;
-          }
-
-          umpPacket.umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
-
-          // Determine if complete based on if currently in SYSEX
-          if ( ump->midi1IsInSysex[cbl_num] )
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_END | 2;
-            ump->midi1IsInSysex[cbl_num] = false; // we are done with SYSEX
-          }
-          else
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 2;
-          }
-
-          // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
-          for (int count=1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
-          }
-          // Pad rest of data
-          umpPacket.umpData.umpBytes[6]  = 0x00;
-          umpPacket.umpData.umpBytes[7] = 0x00;
-          
-          umpPacket.wordCount = 2;
-          break;
-
-        case MIDI_CIN_SYSEX_END_3BYTE :
-          // Needs more space, confirm available
-          if (!(numRead + 1 < numAvail))
-          {
-            return numRead;
-          }
-
-          umpPacket.umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
-
-          // Determine if complete based on if currently in SYSEX
-          if ( ump->midi1IsInSysex[cbl_num] )
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_END | 3;
-            ump->midi1IsInSysex[cbl_num] = false; // we are done with SYSEX
-          }
-          else
-          {
-            umpPacket.umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 3;
-          }
-
-          // Copy in the data, assumes the original USB MIDI 1.0 data has padded data
-          for (int count=1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count+1] = readStream.buffer[count];
-          }
-          // Pad rest of data
-          umpPacket.umpData.umpBytes[6]  = 0x00;
-          umpPacket.umpData.umpBytes[7] = 0x00;
-          
-          umpPacket.wordCount = 2;
-          break;
-
-        // MIDI1 Channel Voice Messages
-        case MIDI_CIN_NOTE_ON :
-        case MIDI_CIN_NOTE_OFF :
-        case MIDI_CIN_POLY_KEYPRESS :
-        case MIDI_CIN_CONTROL_CHANGE :
-        case MIDI_CIN_PROGRAM_CHANGE :
-        case MIDI_CIN_CHANNEL_PRESSURE :
-        case MIDI_CIN_PITCH_BEND_CHANGE :
-          umpPacket.umpData.umpBytes[0] = UMP_MT_MIDI1_CV | cbl_num; // message type 2
-          ump->midi1IsInSysex[cbl_num] = false; // ensure we end any current sysex packets, other layers need to handle error
-
-          // Copy in rest of data
-          for (int count=1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count] = readStream.buffer[count];
-          }
-
-          umpPacket.wordCount = 1;
-          break;
-
-        case MIDI_CIN_SYSCOM_2BYTE :
-        case MIDI_CIN_SYSCOM_3BYTE :
-          umpPacket.umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
-          for (int count = 1; count < 4; count++)
-          {
-            umpPacket.umpData.umpBytes[count] = readStream.buffer[count];
-          }
-          umpPacket.wordCount = 1;
-          break;
-
-        case MIDI_CIN_MISC :
-        case MIDI_CIN_CABLE_EVENT :
-          // These are reserved for future use and will not be translated, drop data with no processing
-        default :
-          // Error or not handled
-          break;
-      }
-
-      // Assuming Data processed so read in packet to clear from FIFO
-      tu_fifo_read_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer));
-
-      // write to packets
-      for (int pktCount = 0; pktCount < umpPacket.wordCount; pktCount++)
-      {
-        pkts[numRead++] = tu_u32(U32_TO_U8S_LE(umpPacket.umpData.umpWords[pktCount]));
       }
     }
   }
   else
   {
+    uint8_t umpBuffer[4];
+    // Read in as much data as possible
     while (numRead < numAvail &&
-      tu_fifo_read_n(&ump->rx_ff, readStream.buffer, sizeof(readStream.buffer)) == sizeof(readStream.buffer))
+      tu_fifo_read_n(&ump->rx_ff, umpBuffer, 4) == 4)
     {
-      pkts[numRead++] = *(uint32_t *)&readStream.buffer;
+      pkts[numRead++] = *(uint32_t *)umpBuffer;
     }
   }
 
+END_READ:
   _prep_out_transaction(ump);
 
   return numRead;
@@ -518,7 +369,7 @@ static uint32_t write_flush(umpd_interface_t* ump)
 }
 
 /**
- * @brief Procse data write for USB IN Stream to host device.
+ * @brief Process data write for USB IN Stream to host device.
  * Will write up to the number of UMP packets provided to the USB data stream.
  * If required, will convert to USB MIDI 1.0 stream format.
  * NOTE: This routine will translate to a single USB endpoint data message. Therefore
@@ -534,9 +385,14 @@ static uint32_t write_flush(umpd_interface_t* ump)
 uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
+  //TU_VERIFY(ump->ep_out);
 
-  TU_VERIFY(ump->ep_out);
-  uint16_t numProcessed = 0;
+  uint16_t  numProcessed = 0;
+  uint8_t   *pBuffer = (uint8_t *)words;
+  bool      bEnterSysex;
+  bool      bEndSysex;
+  uint8_t   numberBytes;
+  uint8_t   sysexStatus;
 
   // As long as there is data to process and room to write into fifo
   while (numProcessed < numWords)
@@ -546,43 +402,44 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
     if ( ump->ump_interface_selected != 1 )
     {
       UMP_PACKET umpPacket;
-      UMP_PACKET umpWritePacket;  // used as storage to translate to USB MIDI 1.0
+      UMP_PACKET umpWritePacket; // used as storage to translate to USB MIDI 1.0
 
       umpPacket.wordCount = 0;
 
-      // First determine the size of UMP packet based on message type
-      umpPacket.umpData.umpWords[0] = tu_u32(U32_TO_U8S_LE(words[numProcessed]));
-      switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
+      // Determine size of UMP packet based on message type
+      umpPacket.umpData.umpWords[0] = RtlUlongByteSwap(words[numProcessed]);
+
+      switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
       {
-        case UMP_MT_UTILITY :
-        case UMP_MT_SYSTEM :
-        case UMP_MT_MIDI1_CV :
-        case 0x60 : // undefined
-        case 0x70 : // undefined
+        case UMP_MT_UTILITY:
+        case UMP_MT_SYSTEM:
+        case UMP_MT_MIDI1_CV:
+        case UMP_MT_RESERVED_6:
+        case UMP_MT_RESERVED_7:
           umpPacket.wordCount = 1;
           break;
 
-        case UMP_MT_DATA_64 :
-        case UMP_MT_MIDI2_CV :
-        case 0x80 : // undefined
-        case 0x90 : // undefined
-        case 0xa0 : // undefined
+        case UMP_MT_DATA_64:
+        case UMP_MT_MIDI2_CV:
+        case UMP_MT_RESERVED_8:
+        case UMP_MT_RESERVED_9:
+        case UMP_MT_RESERVED_A:
           umpPacket.wordCount = 2;
           break;
 
-        case 0xb0 : // undefined
-        case 0xc0 : // undefined
+        case UMP_MT_RESERVED_B:
+        case UMP_MT_RESERVED_C:
           umpPacket.wordCount = 3;
           break;
 
-        case UMP_MT_DATA_128 :
-        case UMP_MT_FLEX_128 :
-        case UMP_MT_STREAM_128 :
-        case 0xe0 : // undefined
+        case UMP_MT_DATA_128:
+        case UMP_MT_FLEX_128:
+        case UMP_MT_STREAM_128:
+        case UMP_MT_RESERVED_E:
           umpPacket.wordCount = 4;
           break;
 
-        default :
+        default:
           // Unhandled or corrupt data, force to move on
           numProcessed++;
           continue;
@@ -597,38 +454,43 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       // Get rest of words if needed for UMP Packet
       for (int count = 1; count < umpPacket.wordCount; count++)
       {
-        umpPacket.umpData.umpWords[count] = tu_u32(U32_TO_U8S_LE(words[numProcessed+count]));
+        umpPacket.umpData.umpWords[count] = RtlUlongByteSwap(words[numProcessed + count]);
       }
 
+      // Now that we have full UMP packet, need to convert to USB MIDI 1.0 format
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK; // if used, cable num is group block num
 
-      switch(umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
+      switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
       {
-        case UMP_MT_SYSTEM :  // System Common messages
+        case UMP_MT_SYSTEM:  // System Common messages
           umpWritePacket.wordCount = 1; // All types are single USB UMP 1.0 message
           // Now need to determine number of bytes for CIN
-          switch(umpPacket.umpData.umpBytes[1])
+          switch (umpPacket.umpData.umpBytes[1])
           {
-            case UMP_SYSTEM_TUNE_REQ :
-            case UMP_SYSTEM_TIMING_CLK :
-            case UMP_SYSTEM_START :
-            case UMP_SYSTEM_CONTINUE :
-            case UMP_SYSTEM_STOP :
-            case UMP_SYSTEM_ACTIVE_SENSE :
-            case UMP_SYSTEM_RESET :
+            case UMP_SYSTEM_TUNE_REQ:
+            case UMP_SYSTEM_TIMING_CLK:
+            case UMP_SYSTEM_START:
+            case UMP_SYSTEM_CONTINUE:
+            case UMP_SYSTEM_STOP:
+            case UMP_SYSTEM_ACTIVE_SENSE:
+            case UMP_SYSTEM_RESET:
+            case UMP_SYSTEM_UNDEFINED_F4:
+            case UMP_SYSTEM_UNDEFINED_F5:
+            case UMP_SYSTEM_UNDEFINED_F9:
+            case UMP_SYSTEM_UNDEFINED_FD:
               umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
               break;
-            
-            case UMP_SYSTEM_MTC :
-            case UMP_SYSTEM_SONG_SELECT :
+
+            case UMP_SYSTEM_MTC:
+            case UMP_SYSTEM_SONG_SELECT:
               umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSCOM_2BYTE;
               break;
 
-            case UMP_SYSTEM_SONG_POS_PTR :
+            case UMP_SYSTEM_SONG_POS_PTR:
               umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSCOM_3BYTE;
               break;
 
-            default :
+            default:
               umpWritePacket.wordCount = 0;
               break;
           }
@@ -640,7 +502,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
           }
           break;
 
-        case UMP_MT_MIDI1_CV :
+        case UMP_MT_MIDI1_CV:
           umpWritePacket.wordCount = 1;
           umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | ((umpPacket.umpData.umpBytes[1] & 0xf0) >> 4);
           for (int count = 1; count < 4; count++)
@@ -649,116 +511,150 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
           }
           break;
 
-        case UMP_MT_DATA_64 :
-        {
-          bool bEndSysex = false;
+        case UMP_MT_DATA_64:
+          bEnterSysex = false;
+          bEndSysex = false;
+
+          umpWritePacket.wordCount = 0;
 
           // Determine if sysex will end after this message
-          switch(umpPacket.umpData.umpBytes[1] & UMP_SYSEX7_STATUS_MASK)
+          switch (umpPacket.umpData.umpBytes[1] & UMP_SYSEX7_STATUS_MASK)
           {
-            case UMP_SYSEX7_COMPLETE :
-              ump->midi1OutSysex[cbl_num].index = 1;
-            case UMP_SYSEX7_END :
+            case UMP_SYSEX7_COMPLETE:
+              bEnterSysex = true;
+            case UMP_SYSEX7_END:
               bEndSysex = true;
               break;
 
-            case UMP_SYSEX7_START :
-              ump->midi1OutSysex[cbl_num].index = 1;
-            default :
+            case UMP_SYSEX7_START:
+              bEnterSysex = true;
+            default:
               bEndSysex = false;
               break;
           }
 
-          // determine the size
-          uint8_t sysexSize = umpPacket.umpData.umpBytes[1] & UMP_SYSEX7_SIZE_MASK;
-
-          // determine the number of USB MIDI 1 packets to be created
-          uint8_t numWordsNeeded = (sysexSize + ump->midi1OutSysex[cbl_num].index - 1) / 3;
-          uint8_t numBytesRemain = (sysexSize + ump->midi1OutSysex[cbl_num].index - 1) % 3;
-          if (bEndSysex && numBytesRemain)
+          if (bEnterSysex)
           {
-            numWordsNeeded++; // add word for any remaining sysex data
-          }
-          umpWritePacket.wordCount = numWordsNeeded;
-          // is there enough fifo?
-          if ( (tu_fifo_remaining(&ump->tx_ff) / 4) < numWordsNeeded )
-          {
-            goto exitWrite; // if not enough, then we need to let everything else run to clear up some room
-                            // and then try again
-          }
-
-          uint8_t sysexCount = 0;
-          uint8_t sysexWordCount = 0;
-          while( sysexCount < sysexSize && sysexWordCount < numWordsNeeded )
-          {
-            ump->midi1OutSysex[cbl_num].buffer[ump->midi1OutSysex[cbl_num].index++] = umpPacket.umpData.umpBytes[2+sysexCount++];
-
-            // is current packet build full
-            if (ump->midi1OutSysex[cbl_num].index == 4)
+            // Determine if believed already in Sysex and if so, reset converter
+            if (ump->midi1OutSysex[cbl_num].inSysex)
             {
-              ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4);
+              ump->midi1OutSysex[cbl_num].inSysex = false;
+            }
+          }
+
+          if (bEnterSysex && !ump->midi1OutSysex[cbl_num].inSysex)
+          {
+            ump->midi1OutSysex[cbl_num].usbMIDI1Head = 0;
+            ump->midi1OutSysex[cbl_num].usbMIDI1Tail = 0;
+            ump->midi1OutSysex[cbl_num].inSysex = true;
+          }
+
+          uint8_t byteStream[SYSEX_BS_RB_SIZE];
+          sysexStatus = (umpPacket.umpData.umpBytes[1] >> 4);
+          numberBytes = 0;
+
+          if (sysexStatus <= 1 && numberBytes < SYSEX_BS_RB_SIZE)
+          {
+            byteStream[numberBytes++] = MIDI_STATUS_SYSEX_START;
+          }
+          for (uint8_t count = 0; count < (umpPacket.umpData.umpBytes[1] & 0xf); count++)
+          {
+            if (numberBytes < SYSEX_BS_RB_SIZE)
+            {
+              byteStream[numberBytes++] = umpPacket.umpData.umpBytes[2 + count];
+            }
+          }
+          if ((sysexStatus == 0 || sysexStatus == 3) && numberBytes < SYSEX_BS_RB_SIZE)
+          {
+            byteStream[numberBytes++] = MIDI_STATUS_SYSEX_END;
+          }
+
+          // Move into sysex circular buffer queue
+          for (uint8_t count = 0; count < numberBytes; count++)
+          {
+            ump->midi1OutSysex[cbl_num].sysexBS[ump->midi1OutSysex[cbl_num].usbMIDI1Head++]
+                = byteStream[count];
+            ump->midi1OutSysex[cbl_num].usbMIDI1Head %= SYSEX_BS_RB_SIZE;
+          }
+
+          // How many bytes available in BS
+          numberBytes = (ump->midi1OutSysex[cbl_num].usbMIDI1Head > ump->midi1OutSysex[cbl_num].usbMIDI1Tail)
+              ? ump->midi1OutSysex[cbl_num].usbMIDI1Head - ump->midi1OutSysex[cbl_num].usbMIDI1Tail
+              : (SYSEX_BS_RB_SIZE - ump->midi1OutSysex[cbl_num].usbMIDI1Tail) + ump->midi1OutSysex[cbl_num].usbMIDI1Head;
+
+          while (numberBytes && umpWritePacket.wordCount < 4)
+          {
+            umpWritePacket.umpData.umpWords[umpWritePacket.wordCount] = 0;
+
+            if (numberBytes > 2)
+            {
+              uint8_t *pumpBytes = (uint8_t*) & umpWritePacket.umpData.umpWords[umpWritePacket.wordCount];
+              for (uint8_t count = 0; count < 3; count++)
+              {
+                pumpBytes[count + 1] =
+                  ump->midi1OutSysex[cbl_num].sysexBS[ump->midi1OutSysex[cbl_num].usbMIDI1Tail++];
+                ump->midi1OutSysex[cbl_num].usbMIDI1Tail %= SYSEX_BS_RB_SIZE;
+                numberBytes--;
+              }
+              // Mark cable number and CIN for start / continue SYSEX in USB MIDI 1.0 format
+              if (bEndSysex && !numberBytes)
+              {
+                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_3BYTE;
+              }
+              else
+              {
+                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_START;
+              }
+            }
+            else
+            {
+              // If less than two and we have a word to populate, check if the end of sysex
               if (bEndSysex)
               {
-                if (sysexCount == sysexSize)
+                // Process bytes
+                uint8_t* pumpBytes = (uint8_t*)&umpWritePacket.umpData.umpWords[umpWritePacket.wordCount];
+                uint8_t count;
+                for (count = 0; numberBytes; count++)
                 {
-                   ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_END_3BYTE;
+                  pumpBytes[count + 1] =
+                    ump->midi1OutSysex[cbl_num].sysexBS[ump->midi1OutSysex[cbl_num].usbMIDI1Tail++];
+                  ump->midi1OutSysex[cbl_num].usbMIDI1Tail %= SYSEX_BS_RB_SIZE;
+                  numberBytes--;
                 }
-                else
+                // Mark cable number and CIN for start / continue SYSEX in USB MIDI 1.0 format
+                switch (count)
                 {
-                   ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_START;
+                  case 1:
+                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
+                    break;
+
+                  case 2:
+                  default:
+                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_2BYTE;
+                    break;
                 }
               }
               else
               {
-                ump->midi1OutSysex[cbl_num].buffer[0] |= MIDI_CIN_SYSEX_START;
+                break;
               }
-
-              // Fill Word into write packet and reset index
-              umpWritePacket.umpData.umpWords[sysexWordCount++] = *(uint32_t *)&ump->midi1OutSysex[cbl_num].buffer;
-              ump->midi1OutSysex[cbl_num].index = 1;
             }
-          }
-
-          // Determine if need to terminate current word
-          if (bEndSysex && numBytesRemain)
-          {
-            // Fill rest of buffer
-            while(ump->midi1OutSysex[cbl_num].index < 4) // WRONG LOGIC HERE
-            {
-              ump->midi1OutSysex[cbl_num].buffer[ump->midi1OutSysex[cbl_num].index++] = 0x00;
-            }
-            switch (numBytesRemain)
-            {
-              case 1 :
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
-                break;
-              
-              case 2 :
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_2BYTE;
-                break;
-
-              default :
-                // should never get here, but use full packet in error
-                ump->midi1OutSysex[cbl_num].buffer[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_3BYTE;
-            }
-
-            // Fill Word into write packet
-            umpWritePacket.umpData.umpWords[sysexWordCount++] = *(uint32_t *)&ump->midi1OutSysex[cbl_num].buffer;
-            ump->midi1OutSysex[cbl_num].index = 1;
+            umpWritePacket.wordCount++;
           }
           break;
-        }
 
         default:
           // Not handled so ignore
-          numProcessed += umpPacket.wordCount;
+          numProcessed += umpPacket.wordCount;    // ignore this UMP packet as corrupted
           umpWritePacket.wordCount = 0;
       }
 
       if (umpWritePacket.wordCount)
       {
         numProcessed += umpPacket.wordCount;
-        tu_fifo_write_n(&ump->tx_ff, (void*)&umpWritePacket.umpData, umpWritePacket.wordCount*4);
+      
+        tu_fifo_write_n(&ump->tx_ff, (void*)&umpWritePacket.umpData.umpBytes[0],
+          umpWritePacket.wordCount*4);
       }
     }
     else
@@ -804,6 +700,13 @@ void umpd_init(void)
   }
 }
 
+bool umpd_deinit(void)
+{
+  // Need to add to handle cleanup of multiple instances
+
+  return true;
+}
+
 void umpd_reset(uint8_t rhport)
 {
   (void) rhport;
@@ -819,7 +722,9 @@ void umpd_reset(uint8_t rhport)
     for(uint8_t grp=0; grp<MAX_NUM_GROUPS_CABLES; grp++)
     {
       ump->midi1IsInSysex[grp] = false;
-      ump->midi1OutSysex[grp].index = 1;
+      ump->midi1OutSysex[grp].inSysex = 0;
+      ump->midi1OutSysex[grp].usbMIDI1Head = 0;
+      ump->midi1OutSysex[grp].usbMIDI1Tail = 0;
     }
 
     ump->ump_interface_selected = 0;
@@ -1011,5 +916,289 @@ bool umpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
 
   return true;
 }
+
+bool
+tud_USBMIDI1ToUMP(
+    uint32_t        usbMidi1Pkt,
+    bool*           pbIsInSysex,
+    PUMP_PACKET     umpPkt
+)
+/*++
+Routine Description:
+
+    Helper routine to handle conversion of USB MIDI 1.0 32 bit word packet
+    to UMP formatted packet. The routine will only populate UMP message
+    types 1: System, 2: MIDI 1.0 Channel Voice, and 3: 64 bit data (SYSEX)
+    messages. It is rsponsibility of other routines to convert between
+    MIDI 2.0 Channel voice if needed.
+
+  NOTE: This routine was refined from the USB MIDI 2.0 Host Driver developed as open
+  source to be included in Windows by the Association of Musical Electronics Industry.
+
+Copyright 2023 Association of Musical Electronics Industry
+Copyright 2023 Microsoft
+Driver source code developed by AmeNote. Some components Copyright 2023 AmeNote Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Arguments:
+
+    usbMidi1Pkt:    The USB MIDI 1.0 packet presented as a 32 bit word
+    pbIsInSysex:    Reference to boolean variable where to store if processing
+                    a SYSEX message or not. Note that calling funciton is
+                    responsible to maintain this state for each USB MIDI 1.0
+                    data stream to process. The intial value should be false.
+    umpPkt:         Reference to data location to create UMP packet into. Note
+                    that for optimizations, the data beyond wordCount is not
+                    cleared, therefore calling function should not process beyond
+                    wordCount or zero any additional dataspace.
+
+Return Value:
+
+    bool:           Indicates true of umpPkt is ready, false otherwise.
+
+--*/
+{
+    // Checked passed parameters
+    if (!usbMidi1Pkt || !pbIsInSysex || !umpPkt)
+    {
+        return false;
+    }
+
+    uint8_t* pBuffer = (uint8_t*)&usbMidi1Pkt;
+    umpPkt->wordCount = 0;
+
+    // Determine packet cable number from group
+    uint8_t cbl_num = (pBuffer[0] & 0xf0) >> 4;
+
+    // USB MIDI 1.0 uses a CIN as an identifier for packet, grab CIN.
+    uint8_t code_index = pBuffer[0] & 0x0f;
+
+    // Handle special case of single byte data
+    if (code_index == MIDI_CIN_1BYTE_DATA && (pBuffer[1] & 0x80))
+    {
+        switch (pBuffer[1])
+        {
+        case UMP_SYSTEM_TUNE_REQ:
+        case UMP_SYSTEM_TIMING_CLK:
+        case UMP_SYSTEM_START:
+        case UMP_SYSTEM_CONTINUE:
+        case UMP_SYSTEM_STOP:
+        case UMP_SYSTEM_ACTIVE_SENSE:
+        case UMP_SYSTEM_RESET:
+        case UMP_SYSTEM_UNDEFINED_F4:
+        case UMP_SYSTEM_UNDEFINED_F5:
+        case UMP_SYSTEM_UNDEFINED_F9:
+        case UMP_SYSTEM_UNDEFINED_FD:
+            code_index = MIDI_CIN_SYSEX_END_1BYTE;
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    uint8_t firstByte = 1;
+    uint8_t lastByte = 4;
+    uint8_t copyPos;
+
+    switch (code_index)
+    {
+    case MIDI_CIN_SYSEX_START: // or continue
+ 
+        if (!*pbIsInSysex)
+        {
+            // SYSEX Start means first byte should be SYSEX start
+            if (pBuffer[1] != MIDI_STATUS_SYSEX_START) return false;
+            firstByte = 2;
+            lastByte = 4;
+
+            // As this is start of SYSEX, need to set status to indicate so and copy 2 bytes of data
+            // as first byte of MIDI_STATUS_SYSEX_START
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_START | 2;
+
+            // Set that in SYSEX
+            *pbIsInSysex = true;
+        }
+        else
+        {
+            firstByte = 1;
+            lastByte = 4;
+
+            // As this is in SYSEX, then need to indicate continue
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_CONTINUE | 3;
+        }
+
+        // Capture Cable number
+        umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;   // Message Type and group
+
+        umpPkt->wordCount = 2;
+        // Transfer in bytes
+        copyPos = firstByte;
+        for (uint8_t count = 2; count < 8; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = (copyPos < lastByte)
+                ? pBuffer[copyPos++] : 0x00;
+        }
+        break;
+
+    case MIDI_CIN_SYSEX_END_1BYTE: // or single byte System Common
+        // Determine if a system common
+        if ( (pBuffer[1] & 0x80) // most significant bit set and not sysex ending
+            && (pBuffer[1] != MIDI_STATUS_SYSEX_END))
+        {
+            umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
+            umpPkt->umpData.umpBytes[1] = pBuffer[1];
+            firstByte = 1;
+            lastByte = 1;
+            goto COMPLETE_1BYTE;
+        }
+
+        umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+        // Determine if complete based on if currently in SYSEX
+        if (*pbIsInSysex)
+        {
+            if (pBuffer[1] != MIDI_STATUS_SYSEX_END) return false;
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 0;
+            *pbIsInSysex = false; // we are done with SYSEX
+            firstByte = 1;
+            lastByte = 1;
+        }
+        else
+        {
+            // should not get here
+            return false;
+        }
+
+COMPLETE_1BYTE:
+        umpPkt->wordCount = 2;
+        // Transfer in bytes
+        copyPos = firstByte;
+        for (uint8_t count = 2; count < 8; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = (copyPos < lastByte)
+                ? pBuffer[copyPos++] : 0x00;
+        }
+        break;
+
+    case MIDI_CIN_SYSEX_END_2BYTE:
+        umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+        // Determine if complete based on if currently in SYSEX
+        if (*pbIsInSysex)
+        {
+            if (pBuffer[2] != MIDI_STATUS_SYSEX_END) return false;
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 1;
+            *pbIsInSysex = false; // we are done with SYSEX
+            firstByte = 1;
+            lastByte = 2;
+        }
+        else
+        {
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 0;
+            *pbIsInSysex = false; // we are done with SYSEX
+            firstByte = 1;
+            lastByte = 1;
+        }
+
+        umpPkt->wordCount = 2;
+        // Transfer in bytes
+        copyPos = firstByte;
+        for (uint8_t count = 2; count < 8; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = (copyPos < lastByte)
+                ? pBuffer[copyPos++] : 0x00;
+        }
+        break;
+
+    case MIDI_CIN_SYSEX_END_3BYTE:
+        umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+        // Determine if complete based on if currently in SYSEX
+        if (*pbIsInSysex)
+        {
+            if (pBuffer[3] != MIDI_STATUS_SYSEX_END) return false;
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 2;
+            *pbIsInSysex = false; // we are done with SYSEX
+            firstByte = 1;
+            lastByte = 3;
+        }
+        else
+        {
+            if (pBuffer[1] != MIDI_STATUS_SYSEX_START || pBuffer[3] != MIDI_STATUS_SYSEX_END) return false;
+            umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 1;
+            *pbIsInSysex = false; // we are done with SYSEX
+            firstByte = 2;
+            lastByte = 3;
+        }
+
+        umpPkt->wordCount = 2;
+        // Transfer in bytes
+        copyPos = firstByte;
+        for (uint8_t count = 2; count < 8; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = (copyPos < lastByte)
+                ? pBuffer[copyPos++] : 0x00;
+        }
+        break;
+
+        // MIDI1 Channel Voice Messages
+    case MIDI_CIN_NOTE_ON:
+    case MIDI_CIN_NOTE_OFF:
+    case MIDI_CIN_POLY_KEYPRESS:
+    case MIDI_CIN_CONTROL_CHANGE:
+    case MIDI_CIN_PROGRAM_CHANGE:
+    case MIDI_CIN_CHANNEL_PRESSURE:
+    case MIDI_CIN_PITCH_BEND_CHANGE:
+        umpPkt->umpData.umpBytes[0] = UMP_MT_MIDI1_CV | cbl_num; // message type 2
+        *pbIsInSysex = false; // ensure we end any current sysex packets, other layers need to handle error
+
+        // Copy in rest of data
+        for (int count = 1; count < 4; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = pBuffer[count];
+        }
+
+        umpPkt->wordCount = 1;
+        break;
+
+    case MIDI_CIN_SYSCOM_2BYTE:
+    case MIDI_CIN_SYSCOM_3BYTE:
+        umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
+        for (int count = 1; count < 4; count++)
+        {
+            umpPkt->umpData.umpBytes[count] = pBuffer[count];
+        }
+        umpPkt->wordCount = 1;
+        break;
+
+    case MIDI_CIN_MISC:
+    case MIDI_CIN_CABLE_EVENT:
+        // These are reserved for future use and will not be translated, drop data with no processing
+    default:
+        // Not valid USB MIDI 1.0 transfer or NULL, skip
+        return false;
+    }
+
+    return true;
+}
+
 } // extern "C"
 #endif
