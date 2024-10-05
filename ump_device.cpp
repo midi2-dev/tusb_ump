@@ -194,20 +194,6 @@ CFG_TUSB_MEM_SECTION umpd_interface_t _umpd_itf[CFG_TUD_UMP];
 
 extern "C"
 {
-inline uint32_t RtlUlongByteSwap(uint32_t wordToSwap)
-{
-  uint8_t *pFrom = (uint8_t *)&wordToSwap;
-  uint32_t returnVal = 0;
-  uint8_t *pTo = (uint8_t *)&returnVal;
-
-  pTo[0] = pFrom[3];
-  pTo[1] = pFrom[2];
-  pTo[2] = pFrom[1];
-  pTo[3] = pFrom[0];
-
-  return returnVal;
-}
-
 bool     tud_USBMIDI1ToUMP    (uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMP_PACKET umpPkt);
 
 bool tud_ump_n_mounted (uint8_t itf)
@@ -299,6 +285,7 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
         goto END_READ;
       }
       numProcessed++;
+      //readWord = RtlUlongByteSwap(readWord);
 
       if (readWord)
       {
@@ -385,14 +372,16 @@ static uint32_t write_flush(umpd_interface_t* ump)
 uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
-  //TU_VERIFY(ump->ep_out);
+  TU_VERIFY(ump->ep_out);
 
-  uint16_t  numProcessed = 0;
-  uint8_t   *pBuffer = (uint8_t *)words;
-  bool      bEnterSysex;
-  bool      bEndSysex;
-  uint8_t   numberBytes;
-  uint8_t   sysexStatus;
+  uint16_t    numProcessed = 0;
+  uint8_t     *pBuffer = (uint8_t *)words;
+  bool        bEnterSysex;
+  bool        bEndSysex;
+  uint8_t     numberBytes;
+  uint8_t     sysexStatus;
+  static UMP_PACKET  umpPacket;
+  static UMP_PACKET  umpWritePacket; // used as storage to translate to USB MIDI 1.0
 
   // As long as there is data to process and room to write into fifo
   while (numProcessed < numWords)
@@ -401,13 +390,11 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
     // Convert to USB MIDI 1.0?
     if ( ump->ump_interface_selected != 1 )
     {
-      UMP_PACKET umpPacket;
-      UMP_PACKET umpWritePacket; // used as storage to translate to USB MIDI 1.0
-
       umpPacket.wordCount = 0;
 
       // Determine size of UMP packet based on message type
-      umpPacket.umpData.umpWords[0] = RtlUlongByteSwap(words[numProcessed]);
+      //umpPacket.umpData.umpWords[0] = RtlUlongByteSwap(words[numProcessed]);
+      umpPacket.umpData.umpWords[0] = words[numProcessed];
 
       switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
       {
@@ -454,13 +441,14 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       // Get rest of words if needed for UMP Packet
       for (int count = 1; count < umpPacket.wordCount; count++)
       {
-        umpPacket.umpData.umpWords[count] = RtlUlongByteSwap(words[numProcessed + count]);
+        umpPacket.umpData.umpWords[count] = words[numProcessed + count];
       }
 
       // Now that we have full UMP packet, need to convert to USB MIDI 1.0 format
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK; // if used, cable num is group block num
 
-      switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
+      uint8_t mtVal = umpPacket.umpData.umpBytes[0] & UMP_MT_MASK;
+      switch (mtVal)
       {
         case UMP_MT_SYSTEM:  // System Common messages
           umpWritePacket.wordCount = 1; // All types are single USB UMP 1.0 message
