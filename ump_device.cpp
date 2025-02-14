@@ -167,13 +167,13 @@ static uint8_t default_ump_group_terminal_blk_desc[] =
 {
   // header
   5, // bLength
-  MIDI_CS_INTERFACE_GR_TRM_BLOCK,
+  MIDI_1_CS_INTERFACE_GR_TRM_BLOCK,
   MIDI_GR_TRM_BLOCK_HEADER,
   U16_TO_U8S_LE(sizeof(midi2_cs_interface_desc_group_terminal_blocks_t)), // wTotalLength
 
   // block
   13, // bLength
-  MIDI_CS_INTERFACE_GR_TRM_BLOCK,
+  MIDI_1_CS_INTERFACE_GR_TRM_BLOCK,
   MIDI_GR_TRM_BLOCK,
   1,          // bGrpTrmBlkID
   0x00,       // bGrpTrmBlkType: bi-directional
@@ -466,16 +466,16 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
             case UMP_SYSTEM_UNDEFINED_F5:
             case UMP_SYSTEM_UNDEFINED_F9:
             case UMP_SYSTEM_UNDEFINED_FD:
-              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSEX_END_1BYTE;
               break;
 
             case UMP_SYSTEM_MTC:
             case UMP_SYSTEM_SONG_SELECT:
-              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSCOM_2BYTE;
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSCOM_2BYTE;
               break;
 
             case UMP_SYSTEM_SONG_POS_PTR:
-              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_CIN_SYSCOM_3BYTE;
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSCOM_3BYTE;
               break;
 
             default:
@@ -543,7 +543,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
 
           if (sysexStatus <= 1 && numberBytes < SYSEX_BS_RB_SIZE)
           {
-            byteStream[numberBytes++] = MIDI_STATUS_SYSEX_START;
+            byteStream[numberBytes++] = MIDI_1_STATUS_SYSEX_START;
           }
           for (uint8_t count = 0; count < (umpPacket.umpData.umpBytes[1] & 0xf); count++)
           {
@@ -554,7 +554,7 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
           }
           if ((sysexStatus == 0 || sysexStatus == 3) && numberBytes < SYSEX_BS_RB_SIZE)
           {
-            byteStream[numberBytes++] = MIDI_STATUS_SYSEX_END;
+            byteStream[numberBytes++] = MIDI_1_STATUS_SYSEX_END;
           }
 
           // Move into sysex circular buffer queue
@@ -587,11 +587,11 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
               // Mark cable number and CIN for start / continue SYSEX in USB MIDI 1.0 format
               if (bEndSysex && !numberBytes)
               {
-                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_3BYTE;
+                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_1_CIN_SYSEX_END_3BYTE;
               }
               else
               {
-                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_START;
+                pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_1_CIN_SYSEX_START;
               }
             }
             else
@@ -613,12 +613,12 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
                 switch (count)
                 {
                   case 1:
-                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_1BYTE;
+                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_1_CIN_SYSEX_END_1BYTE;
                     break;
 
                   case 2:
                   default:
-                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_CIN_SYSEX_END_2BYTE;
+                    pumpBytes[0] = (uint8_t)(cbl_num << 4) | MIDI_1_CIN_SYSEX_END_2BYTE;
                     break;
                 }
               }
@@ -979,7 +979,7 @@ Return Value:
     uint8_t code_index = pBuffer[0] & 0x0f;
 
     // Handle special case of single byte data
-    if (code_index == MIDI_CIN_1BYTE_DATA && (pBuffer[1] & 0x80))
+    if (code_index == MIDI_1_CIN_1BYTE_DATA && (pBuffer[1] & 0x80))
     {
         switch (pBuffer[1])
         {
@@ -994,7 +994,7 @@ Return Value:
         case UMP_SYSTEM_UNDEFINED_F5:
         case UMP_SYSTEM_UNDEFINED_F9:
         case UMP_SYSTEM_UNDEFINED_FD:
-            code_index = MIDI_CIN_SYSEX_END_1BYTE;
+            code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
             break;
 
         default:
@@ -1008,17 +1008,17 @@ Return Value:
 
     switch (code_index)
     {
-    case MIDI_CIN_SYSEX_START: // or continue
+    case MIDI_1_CIN_SYSEX_START: // or continue
  
         if (!*pbIsInSysex)
         {
             // SYSEX Start means first byte should be SYSEX start
-            if (pBuffer[1] != MIDI_STATUS_SYSEX_START) return false;
+            if (pBuffer[1] != MIDI_1_STATUS_SYSEX_START) return false;
             firstByte = 2;
             lastByte = 4;
 
             // As this is start of SYSEX, need to set status to indicate so and copy 2 bytes of data
-            // as first byte of MIDI_STATUS_SYSEX_START
+            // as first byte of MIDI_1_STATUS_SYSEX_START
             umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_START | 2;
 
             // Set that in SYSEX
@@ -1046,10 +1046,10 @@ Return Value:
         }
         break;
 
-    case MIDI_CIN_SYSEX_END_1BYTE: // or single byte System Common
+    case MIDI_1_CIN_SYSEX_END_1BYTE: // or single byte System Common
         // Determine if a system common
         if ( (pBuffer[1] & 0x80) // most significant bit set and not sysex ending
-            && (pBuffer[1] != MIDI_STATUS_SYSEX_END))
+            && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
         {
             umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
             umpPkt->umpData.umpBytes[1] = pBuffer[1];
@@ -1063,7 +1063,7 @@ Return Value:
         // Determine if complete based on if currently in SYSEX
         if (*pbIsInSysex)
         {
-            if (pBuffer[1] != MIDI_STATUS_SYSEX_END) return false;
+            if (pBuffer[1] != MIDI_1_STATUS_SYSEX_END) return false;
             umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 0;
             *pbIsInSysex = false; // we are done with SYSEX
             firstByte = 1;
@@ -1086,13 +1086,13 @@ COMPLETE_1BYTE:
         }
         break;
 
-    case MIDI_CIN_SYSEX_END_2BYTE:
+    case MIDI_1_CIN_SYSEX_END_2BYTE:
         umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
 
         // Determine if complete based on if currently in SYSEX
         if (*pbIsInSysex)
         {
-            if (pBuffer[2] != MIDI_STATUS_SYSEX_END) return false;
+            if (pBuffer[2] != MIDI_1_STATUS_SYSEX_END) return false;
             umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 1;
             *pbIsInSysex = false; // we are done with SYSEX
             firstByte = 1;
@@ -1116,13 +1116,13 @@ COMPLETE_1BYTE:
         }
         break;
 
-    case MIDI_CIN_SYSEX_END_3BYTE:
+    case MIDI_1_CIN_SYSEX_END_3BYTE:
         umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
 
         // Determine if complete based on if currently in SYSEX
         if (*pbIsInSysex)
         {
-            if (pBuffer[3] != MIDI_STATUS_SYSEX_END) return false;
+            if (pBuffer[3] != MIDI_1_STATUS_SYSEX_END) return false;
             umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 2;
             *pbIsInSysex = false; // we are done with SYSEX
             firstByte = 1;
@@ -1130,7 +1130,7 @@ COMPLETE_1BYTE:
         }
         else
         {
-            if (pBuffer[1] != MIDI_STATUS_SYSEX_START || pBuffer[3] != MIDI_STATUS_SYSEX_END) return false;
+            if (pBuffer[1] != MIDI_1_STATUS_SYSEX_START || pBuffer[3] != MIDI_1_STATUS_SYSEX_END) return false;
             umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 1;
             *pbIsInSysex = false; // we are done with SYSEX
             firstByte = 2;
@@ -1148,13 +1148,13 @@ COMPLETE_1BYTE:
         break;
 
         // MIDI1 Channel Voice Messages
-    case MIDI_CIN_NOTE_ON:
-    case MIDI_CIN_NOTE_OFF:
-    case MIDI_CIN_POLY_KEYPRESS:
-    case MIDI_CIN_CONTROL_CHANGE:
-    case MIDI_CIN_PROGRAM_CHANGE:
-    case MIDI_CIN_CHANNEL_PRESSURE:
-    case MIDI_CIN_PITCH_BEND_CHANGE:
+    case MIDI_1_CIN_NOTE_ON:
+    case MIDI_1_CIN_NOTE_OFF:
+    case MIDI_1_CIN_POLY_KEYPRESS:
+    case MIDI_1_CIN_CONTROL_CHANGE:
+    case MIDI_1_CIN_PROGRAM_CHANGE:
+    case MIDI_1_CIN_CHANNEL_PRESSURE:
+    case MIDI_1_CIN_PITCH_BEND_CHANGE:
         umpPkt->umpData.umpBytes[0] = UMP_MT_MIDI1_CV | cbl_num; // message type 2
         *pbIsInSysex = false; // ensure we end any current sysex packets, other layers need to handle error
 
@@ -1167,8 +1167,8 @@ COMPLETE_1BYTE:
         umpPkt->wordCount = 1;
         break;
 
-    case MIDI_CIN_SYSCOM_2BYTE:
-    case MIDI_CIN_SYSCOM_3BYTE:
+    case MIDI_1_CIN_SYSCOM_2BYTE:
+    case MIDI_1_CIN_SYSCOM_3BYTE:
         umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
         for (int count = 1; count < 4; count++)
         {
@@ -1177,8 +1177,8 @@ COMPLETE_1BYTE:
         umpPkt->wordCount = 1;
         break;
 
-    case MIDI_CIN_MISC:
-    case MIDI_CIN_CABLE_EVENT:
+    case MIDI_1_CIN_MISC:
+    case MIDI_1_CIN_CABLE_EVENT:
         // These are reserved for future use and will not be translated, drop data with no processing
     default:
         // Not valid USB MIDI 1.0 transfer or NULL, skip
