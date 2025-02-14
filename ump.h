@@ -95,24 +95,24 @@
 
 typedef enum
 {
-  MIDI_CS_INTERFACE_HEADER    = 0x01,
-  MIDI_CS_INTERFACE_IN_JACK   = 0x02,
-  MIDI_CS_INTERFACE_OUT_JACK  = 0x03,
-  MIDI_CS_INTERFACE_ELEMENT   = 0x04,
-  MIDI_CS_INTERFACE_GR_TRM_BLOCK = 0x26,
-} midi_cs_interface_subtype_t;
+  MIDI_1_CS_INTERFACE_HEADER    = 0x01,
+  MIDI_1_CS_INTERFACE_IN_JACK   = 0x02,
+  MIDI_1_CS_INTERFACE_OUT_JACK  = 0x03,
+  MIDI_1_CS_INTERFACE_ELEMENT   = 0x04,
+  MIDI_1_CS_INTERFACE_GR_TRM_BLOCK = 0x26,
+} midi_1_cs_interface_subtype_t;
 
 typedef enum
 {
-  MIDI_CS_ENDPOINT_GENERAL = 0x01,
+  MIDI_1_CS_ENDPOINT_GENERAL = 0x01,
   MIDI20_CS_ENDPOINT_GENERAL = 0x02,
-} midi_cs_endpoint_subtype_t;
+} midi_1_cs_endpoint_subtype_t;
 
 typedef enum
 {
-  MIDI_JACK_EMBEDDED = 0x01,
-  MIDI_JACK_EXTERNAL = 0x02
-} midi_jack_type_t;
+  MIDI_1_JACK_EMBEDDED = 0x01,
+  MIDI_1_JACK_EXTERNAL = 0x02
+} midi_1_jack_type_t;
 
 typedef enum
 {
@@ -122,47 +122,47 @@ typedef enum
 
 typedef enum
 {
-  MIDI_CIN_MISC              = 0,
-  MIDI_CIN_CABLE_EVENT       = 1,
-  MIDI_CIN_SYSCOM_2BYTE      = 2, // 2 byte system common message e.g MTC, SongSelect
-  MIDI_CIN_SYSCOM_3BYTE      = 3, // 3 byte system common message e.g SPP
-  MIDI_CIN_SYSEX_START       = 4, // SysEx starts or continue
-  MIDI_CIN_SYSEX_END_1BYTE   = 5, // SysEx ends with 1 data, or 1 byte system common message
-  MIDI_CIN_SYSEX_END_2BYTE   = 6, // SysEx ends with 2 data
-  MIDI_CIN_SYSEX_END_3BYTE   = 7, // SysEx ends with 3 data
-  MIDI_CIN_NOTE_ON           = 8,
-  MIDI_CIN_NOTE_OFF          = 9,
-  MIDI_CIN_POLY_KEYPRESS     = 10,
-  MIDI_CIN_CONTROL_CHANGE    = 11,
-  MIDI_CIN_PROGRAM_CHANGE    = 12,
-  MIDI_CIN_CHANNEL_PRESSURE  = 13,
-  MIDI_CIN_PITCH_BEND_CHANGE = 14,
-  MIDI_CIN_1BYTE_DATA = 15
-} midi_code_index_number_t;
+  MIDI_1_CIN_MISC              = 0,
+  MIDI_1_CIN_CABLE_EVENT       = 1,
+  MIDI_1_CIN_SYSCOM_2BYTE      = 2, // 2 byte system common message e.g MTC, SongSelect
+  MIDI_1_CIN_SYSCOM_3BYTE      = 3, // 3 byte system common message e.g SPP
+  MIDI_1_CIN_SYSEX_START       = 4, // SysEx starts or continue
+  MIDI_1_CIN_SYSEX_END_1BYTE   = 5, // SysEx ends with 1 data, or 1 byte system common message
+  MIDI_1_CIN_SYSEX_END_2BYTE   = 6, // SysEx ends with 2 data
+  MIDI_1_CIN_SYSEX_END_3BYTE   = 7, // SysEx ends with 3 data
+  MIDI_1_CIN_NOTE_ON           = 8,
+  MIDI_1_CIN_NOTE_OFF          = 9,
+  MIDI_1_CIN_POLY_KEYPRESS     = 10,
+  MIDI_1_CIN_CONTROL_CHANGE    = 11,
+  MIDI_1_CIN_PROGRAM_CHANGE    = 12,
+  MIDI_1_CIN_CHANNEL_PRESSURE  = 13,
+  MIDI_1_CIN_PITCH_BEND_CHANGE = 14,
+  MIDI_1_CIN_1BYTE_DATA = 15
+} midi_1_code_index_number_t;
 
 // MIDI 1.0 status byte
 enum
 {
   //------------- System Exclusive -------------//
-  MIDI_STATUS_SYSEX_START                    = 0xF0,
-  MIDI_STATUS_SYSEX_END                      = 0xF7,
+  MIDI_1_STATUS_SYSEX_START                    = 0xF0,
+  MIDI_1_STATUS_SYSEX_END                      = 0xF7,
 
   //------------- System Common -------------//
-  MIDI_STATUS_SYSCOM_TIME_CODE_QUARTER_FRAME = 0xF1,
-  MIDI_STATUS_SYSCOM_SONG_POSITION_POINTER   = 0xF2,
-  MIDI_STATUS_SYSCOM_SONG_SELECT             = 0xF3,
+  MIDI_1_STATUS_SYSCOM_TIME_CODE_QUARTER_FRAME = 0xF1,
+  MIDI_1_STATUS_SYSCOM_SONG_POSITION_POINTER   = 0xF2,
+  MIDI_1_STATUS_SYSCOM_SONG_SELECT             = 0xF3,
   // F4, F5 is undefined
-  MIDI_STATUS_SYSCOM_TUNE_REQUEST            = 0xF6,
+  MIDI_1_STATUS_SYSCOM_TUNE_REQUEST            = 0xF6,
 
   //------------- System RealTime  -------------//
-  MIDI_STATUS_SYSREAL_TIMING_CLOCK           = 0xF8,
+  MIDI_1_STATUS_SYSREAL_TIMING_CLOCK           = 0xF8,
   // 0xF9 is undefined
-  MIDI_STATUS_SYSREAL_START                  = 0xFA,
-  MIDI_STATUS_SYSREAL_CONTINUE               = 0xFB,
-  MIDI_STATUS_SYSREAL_STOP                   = 0xFC,
+  MIDI_1_STATUS_SYSREAL_START                  = 0xFA,
+  MIDI_1_STATUS_SYSREAL_CONTINUE               = 0xFB,
+  MIDI_1_STATUS_SYSREAL_STOP                   = 0xFC,
   // 0xFD is undefined
-  MIDI_STATUS_SYSREAL_ACTIVE_SENSING         = 0xFE,
-  MIDI_STATUS_SYSREAL_SYSTEM_RESET           = 0xFF,
+  MIDI_1_STATUS_SYSREAL_ACTIVE_SENSING         = 0xFE,
+  MIDI_1_STATUS_SYSREAL_SYSTEM_RESET           = 0xFF,
 };
 
 /// MIDI Interface Header Descriptor
@@ -173,7 +173,7 @@ typedef struct TU_ATTR_PACKED
   uint8_t bDescriptorSubType ; ///< Descriptor SubType
   uint16_t bcdMSC            ; ///< MidiStreaming SubClass release number in Binary-Coded Decimal
   uint16_t wTotalLength      ;
-} midi_desc_header_t;
+} midi_1_desc_header_t;
 
 /// MIDI In Jack Descriptor
 typedef struct TU_ATTR_PACKED
@@ -184,7 +184,7 @@ typedef struct TU_ATTR_PACKED
   uint8_t bJackType          ; ///< Embedded or External
   uint8_t bJackID            ; ///< Unique ID for MIDI IN Jack
   uint8_t iJack              ; ///< string descriptor
-} midi_desc_in_jack_t;
+} midi_1_desc_in_jack_t;
 
 
 /// MIDI Out Jack Descriptor with single pin
@@ -201,7 +201,7 @@ typedef struct TU_ATTR_PACKED
   uint8_t baSourcePin;
 
   uint8_t iJack              ; ///< string descriptor
-} midi_desc_out_jack_t ;
+} midi_1_desc_out_jack_t ;
 
 /// MIDI Out Jack Descriptor with multiple pins
 #define midi_desc_out_jack_n_t(input_num) \
@@ -238,7 +238,7 @@ typedef struct TU_ATTR_PACKED
 
   uint16_t bmElementCaps;
   uint8_t  iElement;
-} midi_desc_element_t;
+} midi_1_desc_element_t;
 
 /// MIDI Element Descriptor with multiple pins
 #define midi_desc_element_n_t(input_num) \
@@ -285,7 +285,7 @@ typedef struct TU_ATTR_PACKED
 typedef struct TU_ATTR_PACKED
 {
   uint8_t  bLength            ; ///< Size of this descriptor in bytes: 5
-  uint8_t  bDescriptorType    ; ///< Descriptor Type: MIDI_CS_INTERFACE_GR_TRM_BLOCK
+  uint8_t  bDescriptorType    ; ///< Descriptor Type: MIDI_1_CS_INTERFACE_GR_TRM_BLOCK
   uint8_t  bDescriptorSubType ; ///< Descriptor SubType: MIDI_GR_TRM_BLOCK_HEADER
   uint16_t wTotalLength       ; ///< Total number of bytes returned for the class-specific Group Terminal Block descriptors. Includes the combined length of this header descriptor and all Group Terminal Block descriptors.
 } midi2_desc_group_terminal_block_header_t;
@@ -294,7 +294,7 @@ typedef struct TU_ATTR_PACKED
 typedef struct TU_ATTR_PACKED
 {
   uint8_t  bLength            ; ///< Size of this descriptor in bytes: 13
-  uint8_t  bDescriptorType    ; ///< Descriptor Type: MIDI_CS_INTERFACE_GR_TRM_BLOCK
+  uint8_t  bDescriptorType    ; ///< Descriptor Type: MIDI_1_CS_INTERFACE_GR_TRM_BLOCK
   uint8_t  bDescriptorSubType ; ///< Descriptor SubType: MIDI_GR_TRM_BLOCK
   uint8_t  bGrpTrmBlkID       ; ///< ID of this Group Terminal Block
   uint8_t  bGrpTrmBlkType     ; ///< Group Terminal Block Type
