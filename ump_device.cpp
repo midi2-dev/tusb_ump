@@ -60,6 +60,7 @@
 #include "device/usbd.h"
 #include "device/usbd_pvt.h"
 
+#include "tusb.h"
 #include "ump_device.h"
 
 //--------------------------------------------------------------------+
