@@ -7,14 +7,7 @@
     "type": "git",
     "url": "https://github.com/midi2-dev/tusb_ump"
   },
-  "authors": [
-    { "name": "Michael Loh", "email": "michael@amenote.com", "url": "https://amenote.com" },
-    { "name": "Franz Detro", "url": "https://native-instruments.de" },
-    { "name": "Andrew Mee" },
-    { "name": "Simon Helson" },
-    { "name": "Mohaimen Hassan" },
-    { "name": "Saulo Veríssimo", "url": "https://github.com/sauloverissimo" }
-  ],
+  "authors": [],
   "license": "MIT",
   "frameworks": ["arduino", "espidf"],
   "platforms": ["espressif32"],
