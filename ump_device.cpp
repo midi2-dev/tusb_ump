@@ -64,6 +64,44 @@
 #include "ump_device.h"
 
 //--------------------------------------------------------------------+
+// TinyUSB API compatibility
+//
+// The ESP-IDF TinyUSB fork (shipped by arduino-esp32 3.x) is versioned
+// 0.18 (TUSB_VERSION_NUMBER = 1800) but retains the PRE-0.16 upstream
+// signatures:
+//   usbd_edpt_xfer — 4 args, no is_isr
+//   tu_fifo_config — 5 args, with item_size
+//
+// The upstream TinyUSB 0.16 briefly added `is_isr` and removed
+// `item_size`, then 0.17+ reverted `is_isr`. The IDF fork never
+// adopted those transient changes.
+//
+// Detection: sdkconfig.h is always present in ESP-IDF builds and
+// never in standalone TinyUSB — use it to identify the IDF fork.
+//--------------------------------------------------------------------+
+#if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 1600 && \
+    TUSB_VERSION_NUMBER < 1700 && !__has_include(<sdkconfig.h>)
+  // Upstream TinyUSB 0.16 only (transient: added is_isr, removed item_size)
+  #define _usbd_edpt_xfer(rh, ep, buf, len) \
+      usbd_edpt_xfer((rh), (ep), (buf), (len), false)
+  #define _tu_fifo_cfg(f, buf, depth, item_sz, ow) \
+      tu_fifo_config((f), (buf), (depth), (ow))
+#else
+  // ESP-IDF TinyUSB fork OR upstream TinyUSB < 0.16 / >= 0.17
+  #define _usbd_edpt_xfer(rh, ep, buf, len) \
+      usbd_edpt_xfer((rh), (ep), (buf), (len))
+  #define _tu_fifo_cfg(f, buf, depth, item_sz, ow) \
+      tu_fifo_config((f), (buf), (depth), (item_sz), (ow))
+#endif
+
+// TUD_OPT_RHPORT: defined by the old CFG_TUSB_RHPORT*_MODE config style.
+// TinyUSB 0.18+ on platforms like RP2040 use CFG_TUD_ENABLED instead,
+// leaving TUD_OPT_RHPORT undefined. Single-port USB hardware is always port 0.
+#ifndef TUD_OPT_RHPORT
+  #define TUD_OPT_RHPORT 0
+#endif
+
+//--------------------------------------------------------------------+
 // APP SPECIFIC DRIVERS
 //--------------------------------------------------------------------+
 #define TUSB_NUM_APP_DRIVERS 1  // defines number of app drivers
@@ -221,7 +259,7 @@ static void _prep_out_transaction (umpd_interface_t* p_ump)
   available = tu_fifo_remaining(&p_ump->rx_ff);
 
   if ( available >= sizeof(p_ump->epout_buf) )  {
-    usbd_edpt_xfer(rhport, p_ump->ep_out, p_ump->epout_buf, sizeof(p_ump->epout_buf));
+    _usbd_edpt_xfer(rhport, p_ump->ep_out, p_ump->epout_buf, sizeof(p_ump->epout_buf));
   }else
   {
     // Release endpoint since we don't make any transfer
@@ -346,7 +384,7 @@ static uint32_t write_flush(umpd_interface_t* ump)
 
   if (count)
   {
-    TU_ASSERT( usbd_edpt_xfer(rhport, ump->ep_in, ump->epin_buf, count), 0 );
+    TU_ASSERT( _usbd_edpt_xfer(rhport, ump->ep_in, ump->epin_buf, count), 0 );
     return count;
   }else
   {
@@ -676,8 +714,8 @@ void umpd_init(void)
     umpd_interface_t* ump = &_umpd_itf[i];
 
     // config fifo
-    tu_fifo_config(&ump->rx_ff, ump->rx_ff_buf, CFG_TUD_UMP_RX_BUFSIZE, 1, false);
-    tu_fifo_config(&ump->tx_ff, ump->tx_ff_buf, CFG_TUD_UMP_TX_BUFSIZE, 1, false);
+    _tu_fifo_cfg(&ump->rx_ff, ump->rx_ff_buf, CFG_TUD_UMP_RX_BUFSIZE, 1, false);
+    _tu_fifo_cfg(&ump->tx_ff, ump->tx_ff_buf, CFG_TUD_UMP_TX_BUFSIZE, 1, false);
 
     // Default select the first interface
     ump->ump_interface_selected = 0;
@@ -897,7 +935,7 @@ bool umpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
       {
         if ( usbd_edpt_claim(rhport, p_ump->ep_in) )
         {
-          usbd_edpt_xfer(rhport, p_ump->ep_in, NULL, 0);
+          _usbd_edpt_xfer(rhport, p_ump->ep_in, NULL, 0);
         }
       }
     }
