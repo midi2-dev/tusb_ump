@@ -1,0 +1,24 @@
+# Build artifacts
+.pio/
+build/
+*.o
+*.a
+*.elf
+*.bin
+*.map
+
+# IDE
+.vscode/
+*.swp
+*~
+
+# Python
+*.pyc
+__pycache__/
+
+# Internal working documents (not for upstream)
+tusb_ump_esp32s3_handoff.md
+tusb_ump_rp2040_handoff.md
+*_handoff.md
+CHANGES.md
+CHANGES_pt-BR.md

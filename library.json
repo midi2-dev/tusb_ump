@@ -1,0 +1,19 @@
+{
+  "name": "tusb_ump",
+  "version": "0.1.0",
+  "description": "USB MIDI 2.0 UMP device driver for TinyUSB (midi2-dev/tusb_ump)",
+  "keywords": ["midi", "midi2", "ump", "usb", "tinyusb"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/midi2-dev/tusb_ump"
+  },
+  "authors": [],
+  "license": "MIT",
+  "frameworks": ["arduino", "espidf"],
+  "platforms": ["espressif32"],
+  "build": {
+    "srcDir": ".",
+    "srcFilter": ["+<ump_device.cpp>"],
+    "includeDir": "."
+  }
+}
