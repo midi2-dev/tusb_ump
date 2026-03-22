@@ -179,8 +179,11 @@ static void processRxUMP()
         uint8_t  numWords = umpWordsForMT(mt);
         uint32_t words[4] = { firstWord, 0, 0, 0 };
 
+        // Wait for the remaining words before processing.
+        // Avoids passing a truncated packet to umpStreamHandleRx().
+        if (numWords > 1 && tud_ump_n_available(0) < (numWords - 1)) break;
+
         for (uint8_t w = 1; w < numWords; w++) {
-            if (tud_ump_n_available(0) == 0) break;
             tud_ump_read(0, &words[w], 1);
         }
 

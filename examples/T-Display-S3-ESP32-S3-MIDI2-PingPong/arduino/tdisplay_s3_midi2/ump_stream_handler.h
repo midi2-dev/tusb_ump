@@ -173,6 +173,7 @@ typedef void (*UMPStreamTxCb)(const uint32_t* words, uint8_t nw,
 // Human-readable label for any Stream message status
 // ─────────────────────────────────────────────────────────────
 
+__attribute__((unused))
 static const char* umpStreamLabel(uint16_t status)
 {
     switch (status) {

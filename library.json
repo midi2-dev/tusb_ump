@@ -10,7 +10,7 @@
   "authors": [],
   "license": "MIT",
   "frameworks": ["arduino", "espidf"],
-  "platforms": ["espressif32"],
+  "platforms": ["espressif32", "raspberrypi"],
   "build": {
     "srcDir": ".",
     "srcFilter": ["+<ump_device.cpp>"],
