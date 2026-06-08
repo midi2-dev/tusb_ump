@@ -27,8 +27,7 @@
  */
 
 /** \ingroup group_class
- *  \defgroup ClassDriver_CDC Communication Device Class (CDC)
- *            Currently only Abstract Control Model subclass is supported
+ *  \defgroup ClassDriver_UMP MIDI/UMP Device Class
  *  @{ */
 
 #ifndef _TUSB_UMP_H__

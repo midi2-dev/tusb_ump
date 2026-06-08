@@ -1,0 +1,48 @@
+#######################################
+# Syntax highlighting for tusb_ump
+# USB MIDI 2.0 UMP device driver
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+UMP_PACKET	KEYWORD1
+UMP_TO_MIDI1_SYSEX	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+tud_ump_n_mounted	KEYWORD2
+tud_ump_n_available	KEYWORD2
+tud_ump_n_writeable	KEYWORD2
+tud_ump_write	KEYWORD2
+tud_ump_read	KEYWORD2
+tud_alt_setting	KEYWORD2
+tud_ump_rx_cb	KEYWORD2
+tud_ump_set_itf_cb	KEYWORD2
+tud_ump_get_req_itf_cb	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+UMP_MT_UTILITY	LITERAL1
+UMP_MT_SYSTEM	LITERAL1
+UMP_MT_MIDI1_CV	LITERAL1
+UMP_MT_DATA_64	LITERAL1
+UMP_MT_MIDI2_CV	LITERAL1
+UMP_MT_DATA_128	LITERAL1
+UMP_MT_FLEX_128	LITERAL1
+UMP_MT_STREAM_128	LITERAL1
+UMP_MT_MASK	LITERAL1
+UMP_GROUP_MASK	LITERAL1
+UMP_SYSEX7_COMPLETE	LITERAL1
+UMP_SYSEX7_START	LITERAL1
+UMP_SYSEX7_CONTINUE	LITERAL1
+UMP_SYSEX7_END	LITERAL1
+CFG_TUD_UMP	LITERAL1
+CFG_TUD_UMP_EP_BUFSIZE	LITERAL1
+CFG_TUD_UMP_RX_BUFSIZE	LITERAL1
+CFG_TUD_UMP_TX_BUFSIZE	LITERAL1

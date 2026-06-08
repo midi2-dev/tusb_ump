@@ -1,0 +1,19 @@
+# platform.local.txt — Arduino IDE build flags for tusb_ump
+#
+# Copy as "platform.local.txt" (drop .example) to:
+#   Linux:   ~/.arduino15/packages/esp32/hardware/esp32/<version>/
+#   macOS:   ~/Library/Arduino15/packages/esp32/hardware/esp32/<version>/
+#   Windows: %LOCALAPPDATA%\Arduino15\packages\esp32\hardware\esp32\<version>\
+#
+# Restart Arduino IDE after copying. Remove when no longer needed.
+
+compiler.cpp.extra_flags=-DCFG_TUD_UMP=1 -DCFG_TUD_UMP_RX_BUFSIZE=512 -DCFG_TUD_UMP_TX_BUFSIZE=512 -DCFG_TUD_MIDI=0 -DCONFIG_TINYUSB_MIDI_ENABLED=0
+compiler.c.extra_flags=-DCFG_TUD_UMP=1 -DCFG_TUD_UMP_RX_BUFSIZE=512 -DCFG_TUD_UMP_TX_BUFSIZE=512 -DCFG_TUD_MIDI=0 -DCONFIG_TINYUSB_MIDI_ENABLED=0
+
+# Force the linker to keep our USB descriptor callback overrides.
+# arduino-esp32 links with -Wl,--gc-sections -ffunction-sections, which
+# eliminates "unreachable" functions. Our strong-symbol overrides of the
+# WEAK esp32-hal-tinyusb.c callbacks would otherwise be discarded,
+# causing the device to enumerate with VID=0x303A and a MIDI 1.0-only
+# descriptor instead of our custom MIDI 2.0 dual-alt-setting descriptor.
+compiler.c.elf.extra_flags=-Wl,-u,tud_descriptor_device_cb -Wl,-u,tud_descriptor_configuration_cb -Wl,-u,tud_descriptor_string_cb
