@@ -102,6 +102,25 @@
 #endif
 
 //--------------------------------------------------------------------+
+// ENDIAN HELPERS
+//--------------------------------------------------------------------+
+// UMP wire words are big-endian per the MIDI 2.0 UMP spec (byte 0 = MSB,
+// i.e. the message-type nibble). Arithmetic-based UMP parsers/builders
+// (e.g. `word >> 28` for message type) need the host-native uint32_t value
+// to numerically match that wire word, which requires a byte swap on a
+// little-endian host and no swap on a big-endian host.
+//
+// tud_ump_read()/tud_ump_write() intentionally preserve this driver's
+// original (pre-1.1) raw behavior -- no conversion -- for applications
+// already built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton()
+// for portable, spec-correct behavior in new code.
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+  #define UMP_HOST_BSWAP32(x) (x)
+#else
+  #define UMP_HOST_BSWAP32(x) __builtin_bswap32(x)
+#endif
+
+//--------------------------------------------------------------------+
 // APP SPECIFIC DRIVERS
 //--------------------------------------------------------------------+
 #define TUSB_NUM_APP_DRIVERS 1  // defines number of app drivers
@@ -295,13 +314,20 @@ uint8_t tud_alt_setting( uint8_t itf) {
  * to UMP or pass UMP packets.
  *
  * @param itf       interface number
- * @param pkts      Array of 32 bit formatted UMP packet data (BE Formatted)
+ * @param pkts      Array of 32 bit formatted UMP packet data.
  * @param numAvail  Number of 32 bit UMP words that are available in handle
  *                  to populate. Note to accomodate possible SYSEX, needs to be at least 2
  *                  for 64bit size UMP Packet.
+ * @param hostOrder If true, each returned word is the host-native uint32_t
+ *                  whose arithmetic value matches the UMP wire word (bits
+ *                  31:28 = message type, etc, per the MIDI 2.0 UMP spec) --
+ *                  safe to consume with bit-shifts/masks regardless of host
+ *                  endianness. If false, words are returned via raw
+ *                  byte-buffer reinterpretation with no endian conversion
+ *                  (this driver's original, host-endian-dependent behavior).
  * @return uint16_t Number of 32 bit UMP words populated in handle
  */
-uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
+static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvail, bool hostOrder )
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
@@ -335,7 +361,12 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
         {
           for (uint8_t count = 0; count < pkt.wordCount; count++)
           {
-            pkts[numRead++] = pkt.umpData.umpWords[count];
+            // pkt.umpData.umpBytes[] was built byte-by-byte (byte 0 = MT
+            // nibble, matching wire order). hostOrder callers get the
+            // arithmetic-correct uint32_t; legacy callers get the raw union
+            // reinterpretation (host-endian dependent).
+            uint32_t word = pkt.umpData.umpWords[count];
+            pkts[numRead++] = hostOrder ? UMP_HOST_BSWAP32(word) : word;
           }
         }
       }
@@ -348,7 +379,20 @@ uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
     while (numRead < numAvail &&
       tu_fifo_read_n(&ump->rx_ff, umpBuffer, 4) == 4)
     {
-      pkts[numRead++] = *(uint32_t *)umpBuffer;
+      if (hostOrder)
+      {
+        // Wire format is byte 0 = MSB (MT nibble); compose explicitly for a
+        // portable, host-endian-correct numeric value.
+        pkts[numRead++] = ((uint32_t)umpBuffer[0] << 24) |
+                           ((uint32_t)umpBuffer[1] << 16) |
+                           ((uint32_t)umpBuffer[2] << 8)  |
+                            (uint32_t)umpBuffer[3];
+      }
+      else
+      {
+        // Legacy raw reinterpretation (host-endian dependent).
+        pkts[numRead++] = *(uint32_t *)umpBuffer;
+      }
     }
   }
 
@@ -356,6 +400,23 @@ END_READ:
   _prep_out_transaction(ump);
 
   return numRead;
+}
+
+// Legacy raw interface: words are reinterpreted from the wire byte buffer
+// with no endian conversion (host-endian dependent). Preserved for
+// applications already built against this driver's pre-1.1 behavior.
+uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
+{
+  return tud_ump_read_impl(itf, pkts, numAvail, false);
+}
+
+// Portable interface: each returned word is the host-native uint32_t whose
+// arithmetic value matches the UMP wire word (bits 31:28 = message type),
+// safe to consume with bit-shifts/masks regardless of host endianness.
+// Recommended for new code.
+uint16_t tud_ump_read_ntoh( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
+{
+  return tud_ump_read_impl(itf, pkts, numAvail, true);
 }
 
 //--------------------------------------------------------------------+
@@ -404,11 +465,21 @@ static uint32_t write_flush(umpd_interface_t* ump)
  * or 512 bytes respectively - meaning 16 or 128 UMP words per transfer.
  *
  * @param itf       interface number
- * @param words     pointer to 32 bit formatted UMP data arrray
+ * @param words     Pointer to 32 bit formatted UMP data array.
  * @param numWords   number of 32 bit UMP packets to try to write
+ * @param hostOrder If true, each word in words[] must be the host-native
+ *                  uint32_t numeric value of the UMP word (bits 31:28 =
+ *                  message type, etc, per the MIDI 2.0 UMP spec) -- i.e.
+ *                  built with bit-shifts/masks, not by casting a raw byte
+ *                  buffer to uint32_t*. The driver converts to the correct
+ *                  wire byte order internally, so callers do not need to
+ *                  worry about host endianness. If false, words[] is written
+ *                  via raw byte-buffer reinterpretation with no endian
+ *                  conversion (this driver's original, host-endian-dependent
+ *                  behavior).
  * @return uint16_t number of packets written
  */
-uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
+static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWords, bool hostOrder )
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   TU_VERIFY(ump->ep_out);
@@ -431,9 +502,13 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
     {
       umpPacket.wordCount = 0;
 
-      // Determine size of UMP packet based on message type
-      //umpPacket.umpData.umpWords[0] = RtlUlongByteSwap(words[numProcessed]);
-      umpPacket.umpData.umpWords[0] = words[numProcessed];
+      // Determine size of UMP packet based on message type.
+      // umpBytes[] below is accessed in wire order (byte 0 = MT nibble); for
+      // hostOrder callers words[] is numeric (MT nibble in the arithmetic
+      // top bits) and needs a swap, legacy callers get the raw union
+      // reinterpretation (host-endian dependent).
+      umpPacket.umpData.umpWords[0] = hostOrder
+        ? UMP_HOST_BSWAP32(words[numProcessed]) : words[numProcessed];
 
       switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
       {
@@ -480,7 +555,8 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
       // Get rest of words if needed for UMP Packet
       for (int count = 1; count < umpPacket.wordCount; count++)
       {
-        umpPacket.umpData.umpWords[count] = words[numProcessed + count];
+        umpPacket.umpData.umpWords[count] = hostOrder
+          ? UMP_HOST_BSWAP32(words[numProcessed + count]) : words[numProcessed + count];
       }
 
       // Now that we have full UMP packet, need to convert to USB MIDI 1.0 format
@@ -686,10 +762,24 @@ uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
     }
     else
     {
-      // Should already be UMP formatted, so just pass along
+      // Should already be UMP formatted, so just pass along.
       uint16_t numAvailable = tu_fifo_remaining(&ump->tx_ff) / 4;
       numProcessed = (numAvailable < numWords) ? numAvailable : numWords;
-      tu_fifo_write_n(&ump->tx_ff, (void*)words, numProcessed*4);
+      if (hostOrder)
+      {
+        // words[] is numeric (host-native order); the wire needs byte 0 =
+        // MT nibble (big-endian), so swap each word before writing raw bytes.
+        for (uint16_t count = 0; count < numProcessed; count++)
+        {
+          uint32_t wireWord = UMP_HOST_BSWAP32(words[count]);
+          tu_fifo_write_n(&ump->tx_ff, (void*)&wireWord, 4);
+        }
+      }
+      else
+      {
+        // Legacy raw reinterpretation (host-endian dependent).
+        tu_fifo_write_n(&ump->tx_ff, (void*)words, numProcessed*4);
+      }
     }
   }
 
@@ -700,6 +790,24 @@ exitWrite :
 
   // Let calling routine know how many words processed
   return numProcessed;
+}
+
+// Legacy raw interface: words[] is reinterpreted onto the wire with no
+// endian conversion (host-endian dependent). Preserved for applications
+// already built against this driver's pre-1.1 behavior.
+uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
+{
+  return tud_ump_write_impl(itf, words, numWords, false);
+}
+
+// Portable interface: words[] must be the host-native uint32_t numeric
+// value of each UMP word (bits 31:28 = message type), built with
+// bit-shifts/masks. The driver converts to correct wire byte order
+// internally, so callers do not need to worry about host endianness.
+// Recommended for new code.
+uint16_t tud_ump_write_hton( uint8_t itf, uint32_t *words, uint16_t numWords )
+{
+  return tud_ump_write_impl(itf, words, numWords, true);
 }
 
 //--------------------------------------------------------------------+

@@ -69,11 +69,28 @@ uint32_t tud_ump_n_available    (uint8_t itf );
 // Get the number of words (32 bits) available for writing
 uint32_t tud_ump_n_writeable    (uint8_t itf );
 
-// Write UMP words
+// Write UMP words. Legacy raw interface: words[] is reinterpreted onto the
+// wire with no endian conversion (host-endian dependent). Preserved for
+// applications already built against this driver's pre-1.1 behavior.
 uint16_t tud_ump_write       ( uint8_t itf, uint32_t *words, uint16_t numWords );
 
-// Read UMP words
+// Write UMP words. Portable interface: words[] must be the host-native
+// uint32_t numeric value of each UMP word (bits 31:28 = message type),
+// built with bit-shifts/masks -- safe regardless of host endianness.
+// Recommended for new code.
+uint16_t tud_ump_write_hton  ( uint8_t itf, uint32_t *words, uint16_t numWords );
+
+// Read UMP words. Legacy raw interface: words are reinterpreted from the
+// wire byte buffer with no endian conversion (host-endian dependent).
+// Preserved for applications already built against this driver's pre-1.1
+// behavior.
 uint16_t tud_ump_read        ( uint8_t itf, uint32_t *words, uint16_t numAvail );
+
+// Read UMP words. Portable interface: each returned word is the host-native
+// uint32_t whose arithmetic value matches the UMP wire word (bits 31:28 =
+// message type) -- safe to consume with bit-shifts/masks regardless of
+// host endianness. Recommended for new code.
+uint16_t tud_ump_read_ntoh   ( uint8_t itf, uint32_t *words, uint16_t numAvail );
 
 //Get Alternate Setting
 uint8_t tud_alt_setting( uint8_t itf);
