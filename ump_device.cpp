@@ -111,9 +111,9 @@
 // little-endian host and no swap on a big-endian host.
 //
 // tud_ump_read()/tud_ump_write() intentionally preserve this driver's
-// original (pre-1.1) raw behavior -- no conversion -- for applications
-// already built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton()
-// for portable, spec-correct behavior in new code.
+// existing raw behavior -- no conversion -- for applications already
+// built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton() for
+// portable, spec-correct behavior in new code.
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
   #define UMP_HOST_BSWAP32(x) (x)
 #else
@@ -404,7 +404,7 @@ END_READ:
 
 // Legacy raw interface: words are reinterpreted from the wire byte buffer
 // with no endian conversion (host-endian dependent). Preserved for
-// applications already built against this driver's pre-1.1 behavior.
+// applications already built against this driver's existing behavior.
 uint16_t tud_ump_read( uint8_t itf, uint32_t *pkts, uint16_t numAvail )
 {
   return tud_ump_read_impl(itf, pkts, numAvail, false);
@@ -768,11 +768,21 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
       if (hostOrder)
       {
         // words[] is numeric (host-native order); the wire needs byte 0 =
-        // MT nibble (big-endian), so swap each word before writing raw bytes.
-        for (uint16_t count = 0; count < numProcessed; count++)
+        // MT nibble (big-endian). Swap in fixed-size batches and write each
+        // batch in one call rather than one tu_fifo_write_n() per word.
+        uint32_t wireWords[16];
+        uint16_t offset = 0;
+        uint16_t remaining = numProcessed;
+        while (remaining)
         {
-          uint32_t wireWord = UMP_HOST_BSWAP32(words[count]);
-          tu_fifo_write_n(&ump->tx_ff, (void*)&wireWord, 4);
+          uint16_t chunk = (remaining < TU_ARRAY_SIZE(wireWords)) ? remaining : TU_ARRAY_SIZE(wireWords);
+          for (uint16_t count = 0; count < chunk; count++)
+          {
+            wireWords[count] = UMP_HOST_BSWAP32(words[offset + count]);
+          }
+          tu_fifo_write_n(&ump->tx_ff, (void*)wireWords, chunk*4);
+          offset += chunk;
+          remaining -= chunk;
         }
       }
       else
@@ -794,7 +804,7 @@ exitWrite :
 
 // Legacy raw interface: words[] is reinterpreted onto the wire with no
 // endian conversion (host-endian dependent). Preserved for applications
-// already built against this driver's pre-1.1 behavior.
+// already built against this driver's existing behavior.
 uint16_t tud_ump_write( uint8_t itf, uint32_t *words, uint16_t numWords )
 {
   return tud_ump_write_impl(itf, words, numWords, false);

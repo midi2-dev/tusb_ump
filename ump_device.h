@@ -71,7 +71,7 @@ uint32_t tud_ump_n_writeable    (uint8_t itf );
 
 // Write UMP words. Legacy raw interface: words[] is reinterpreted onto the
 // wire with no endian conversion (host-endian dependent). Preserved for
-// applications already built against this driver's pre-1.1 behavior.
+// applications already built against this driver's existing behavior.
 uint16_t tud_ump_write       ( uint8_t itf, uint32_t *words, uint16_t numWords );
 
 // Write UMP words. Portable interface: words[] must be the host-native
@@ -82,7 +82,7 @@ uint16_t tud_ump_write_hton  ( uint8_t itf, uint32_t *words, uint16_t numWords )
 
 // Read UMP words. Legacy raw interface: words are reinterpreted from the
 // wire byte buffer with no endian conversion (host-endian dependent).
-// Preserved for applications already built against this driver's pre-1.1
+// Preserved for applications already built against this driver's existing
 // behavior.
 uint16_t tud_ump_read        ( uint8_t itf, uint32_t *words, uint16_t numAvail );
 
