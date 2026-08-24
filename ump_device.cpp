@@ -1042,7 +1042,26 @@ bool umpd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t 
   // nothing to with DATA & ACK stage
   if (stage != CONTROL_STAGE_SETUP) return true;
 
-  umpd_interface_t* ump = &_umpd_itf[rhport];
+  // Interface-addressed requests (SET_INTERFACE, GTB GET_DESCRIPTOR) carry the
+  // target interface number in wIndex -- resolve the matching UMP instance by
+  // itf_num, same pattern umpd_xfer_cb() already uses (matched by endpoint
+  // address there instead). Previously this indexed _umpd_itf[rhport], which
+  // is the USB controller/root-hub-port index, not an interface instance --
+  // always resolved to instance 0 regardless of which interface the host
+  // actually addressed. Harmless when CFG_TUD_UMP==1 (single instance, its
+  // itf_num always matches), but silently misrouted every SET_INTERFACE/GTB
+  // request for instance 1+ when CFG_TUD_UMP>1.
+  uint8_t itf_num = tu_u16_low(request->wIndex);
+  umpd_interface_t* ump = NULL;
+  for (uint8_t i = 0; i < CFG_TUD_UMP; i++)
+  {
+    if (_umpd_itf[i].itf_num == itf_num)
+    {
+      ump = &_umpd_itf[i];
+      break;
+    }
+  }
+  TU_VERIFY(ump);
 
   switch ( request->bRequest )
   {
