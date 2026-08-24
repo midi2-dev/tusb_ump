@@ -974,8 +974,59 @@ uint16_t umpd_open(uint8_t rhport, tusb_desc_interface_t const * desc_itf, uint1
     p_desc   = tu_desc_next(p_desc);
   }
 
-  // See if there is an alternate interface for UMP USB MIDI 2.0
-  if ( TUSB_DESC_INTERFACE == tu_desc_type(p_desc) ) drv_len = max_len;
+  // See if there is an alternate interface for UMP USB MIDI 2.0 (bAlternateSetting 1,
+  // same bInterfaceNumber) immediately following. Previously this collapsed to
+  // `drv_len = max_len` -- "nothing more to parse in the whole config descriptor" --
+  // which only held when this was the sole USB MIDI Function (CFG_TUD_UMP == 1). With
+  // a second Function's IAD/interfaces following in the same config descriptor, that
+  // shortcut silently swallowed them: TinyUSB's core driver-dispatch loop believed
+  // umpd_open() had consumed everything and never called it again for instance 1+,
+  // so the second Function's endpoints were never opened and its itf_num never
+  // registered -- any SET_INTERFACE/GTB request addressed to it then failed
+  // TU_VERIFY(ump) in umpd_control_xfer_cb and STALLed (macOS logs "Unable to set
+  // MIDI 2.0 alt setting!" for that interface). Walk the alt setting's own
+  // descriptor block instead, same pattern as Alternate Setting 0 above, so drv_len
+  // correctly reflects only what this interface consumes. Its endpoint descriptors
+  // reuse Alt 0's addresses (USB MIDI 2.0 Alt-Setting model), so we measure their
+  // length without calling usbd_edpt_open() again.
+  while ( TUSB_DESC_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+  {
+    tusb_desc_interface_t const * desc_alt = (tusb_desc_interface_t const *) p_desc;
+    if ( desc_alt->bInterfaceNumber != desc_ump->bInterfaceNumber ) break; // next Function's interface, not an alt setting of this one
+
+    drv_len += tu_desc_len(p_desc);
+    p_desc   = tu_desc_next(p_desc);
+
+    // Skip class-specific descriptors (MS Header etc)
+    while ( TUSB_DESC_CS_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+    {
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+
+    // Skip this alt setting's endpoint descriptors (+ their class-specific descriptors)
+    uint8_t alt_found_endpoints = 0;
+    while ( (alt_found_endpoints < desc_alt->bNumEndpoints) && (drv_len <= max_len) )
+    {
+      if ( TUSB_DESC_ENDPOINT == tu_desc_type(p_desc) )
+      {
+        // Same endpoint address as Alternate Setting 0 -- already opened, do not reopen
+        drv_len += tu_desc_len(p_desc);
+        p_desc   = tu_desc_next(p_desc);
+        alt_found_endpoints += 1;
+      }
+
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+
+    // Finish off any further class specific definitions for this alt setting
+    while ( TUSB_DESC_CS_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+    {
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+  }
 
   // Prepare for incoming data
   _prep_out_transaction(p_ump);
