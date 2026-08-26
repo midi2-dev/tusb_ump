@@ -104,38 +104,13 @@
 //--------------------------------------------------------------------+
 // ENDIAN HELPERS
 //--------------------------------------------------------------------+
-// Two distinct byte-order concerns live in this file -- do not conflate them:
-//
-// 1. INTERNAL representation (UMP_PACKET.umpData.umpBytes[]): this driver's
-//    own field-extraction code (the alt-setting-0 <-> alt-setting-1 MIDI 1.0
-//    CIN translation switch/case logic) reads/builds messages assuming
-//    umpBytes[0] holds the MT/group byte, matching the UMP spec's logical/
-//    diagram view (most-significant byte first). UMP_HOST_BSWAP32 converts
-//    a host-native arithmetic uint32_t (MT in bits 31:28) into/out of that
-//    internal layout, portably regardless of host endianness.
-//
-// 2. WIRE byte order (native alt-setting-1 passthrough, raw bytes read from
-//    or written to the USB endpoint FIFOs): per the USB Device Class
-//    Definition for MIDI Devices v2.0, section 3.2.2 "UMP Messages in a USB
-//    Packet: Byte Ordering" -- "Each 32 bit word of a Universal MIDI Packet
-//    is sent with the least significant byte first" -- confirmed against
-//    real USB captures of a spec-compliant host (byte 0 on the wire is the
-//    word's LSB, byte 3 is the MT/group byte). UMP_WIRE_BSWAP32 converts a
-//    host-native arithmetic uint32_t into/out of that little-endian wire
-//    layout: a no-op on a little-endian host (its native memory layout
-//    already matches), a swap on a big-endian host.
+// UMP_HOST_BSWAP32 / UMP_WIRE_BSWAP32 are defined in ump.h, shared with
+// ump_host.cpp. See that header for the internal-vs-wire layout distinction.
 //
 // tud_ump_read()/tud_ump_write() intentionally preserve this driver's
 // existing raw behavior -- no conversion -- for applications already
 // built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton() for
 // portable, spec-correct behavior in new code.
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-  #define UMP_HOST_BSWAP32(x) (x)
-  #define UMP_WIRE_BSWAP32(x) __builtin_bswap32(x)
-#else
-  #define UMP_HOST_BSWAP32(x) __builtin_bswap32(x)
-  #define UMP_WIRE_BSWAP32(x) (x)
-#endif
 
 //--------------------------------------------------------------------+
 // APP SPECIFIC DRIVERS
