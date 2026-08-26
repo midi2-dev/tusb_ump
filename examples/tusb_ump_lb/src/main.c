@@ -40,6 +40,7 @@
 #include "ump_device.h"
 
 static void led_task(void);
+static void log_echoed(uint8_t alt, const uint32_t *words, uint16_t count);
 
 int main(void)
 {
@@ -61,14 +62,23 @@ int main(void)
         // time, echoing each straight back out.
         while (tud_ump_n_mounted(0) && tud_ump_n_available(0))
         {
-            uint32_t words[4];
-            uint16_t count = tud_ump_read_ntoh(0, words, TU_ARRAY_SIZE(words));
+            // NOTE: buffer is oversized relative to the 4-word request below.
+            // On the legacy MIDI 1.0 byte stream alt setting (0),
+            // tud_ump_read_ntoh() can currently write up to ~2x the numAvail
+            // it's asked for when converting SysEx7 (known upstream
+            // ump_device.cpp bug: it bounds raw USB words consumed, not
+            // converted UMP words written). Requesting 4 but sizing the
+            // buffer for 8 absorbs that overrun without corrupting the
+            // stack; it does not fix the underlying bug.
+            uint32_t words[8];
+            uint16_t count = tud_ump_read_ntoh(0, words, 4);
 
             if (count == 0)
             {
                 break;
             }
 
+            log_echoed(tud_alt_setting(0), words, count);
             tud_ump_write_hton(0, words, count);
         }
     }
@@ -82,6 +92,20 @@ void tud_ump_set_itf_cb(uint8_t itf, uint8_t alt)
 {
     (void) itf;
     printf("tusb_ump_lb: UMP interface active, alt setting %u\n", alt);
+}
+
+// Logs each echoed message over stdio (the board's default UART) so the
+// loopback is visible without a USB MIDI 2.0 host attached, e.g. while
+// bringing up a new port. alt is the MIDIStreaming alternate setting the
+// words were read on (0 = legacy MIDI 1.0 byte stream, 1 = UMP / MIDI 2.0).
+static void log_echoed(uint8_t alt, const uint32_t *words, uint16_t count)
+{
+    printf("tusb_ump_lb: echo alt=%u [", alt);
+    for (uint16_t i = 0; i < count; i++)
+    {
+        printf("%s0x%08lx", i ? " " : "", (unsigned long) words[i]);
+    }
+    printf("]\n");
 }
 
 static void led_task(void)

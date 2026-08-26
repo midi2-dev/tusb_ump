@@ -57,4 +57,9 @@ target_link_libraries(tusb_ump_lb
         tinyusb_device
         )
 
+# Logs (boot message, alt-setting changes, echoed UMP words) go out the
+# board's default UART, not the USB MIDI 2.0 interface itself.
+pico_enable_stdio_uart(tusb_ump_lb 1)
+pico_enable_stdio_usb(tusb_ump_lb 0)
+
 pico_add_extra_outputs(tusb_ump_lb)

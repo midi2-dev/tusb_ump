@@ -20,6 +20,21 @@ mount indicator (blinks while unmounted, solid once the host opens the UMP
 interface). No other wiring is required - loop MIDI back to itself purely
 over USB.
 
+## Logging
+
+Boot, alt-setting changes, and every echoed message are logged over the
+board's default UART (115200 8N1 - GP0/GP1 on a Pico) so you can watch the
+loopback working without a MIDI 2.0-aware host, e.g.:
+
+```
+tusb_ump_lb: USB MIDI 2.0 (UMP) loopback starting
+tusb_ump_lb: UMP interface active, alt setting 1
+tusb_ump_lb: echo alt=1 [0x40903c64 0x00000000]
+```
+
+The USB MIDI interface itself carries only MIDI data - it is never used for
+logging (`pico_enable_stdio_usb` is off in `CMakeLists.txt`).
+
 ### Porting to other targets
 
 Nothing in `src/main.c` or `src/usb_descriptors.c` is RP2040-specific except
