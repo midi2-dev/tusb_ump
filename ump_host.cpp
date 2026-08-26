@@ -157,7 +157,7 @@ static void umph_parse_gtb_buffer(umph_interface_t* p_ump, uint8_t const* buf, u
     offset += blk->bLength;
   }
 
-  TU_LOG_DRV("UMPH: parsed %u Group Terminal Block(s) from device descriptor\r\n", p_ump->num_gtb);
+  TU_LOG_USBH("UMPH: parsed %u Group Terminal Block(s) from device descriptor\r\n", p_ump->num_gtb);
 }
 
 static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
@@ -181,7 +181,7 @@ static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
   blk->wMaxOutputBandwidth = 0;
   p_ump->num_gtb = 1;
 
-  TU_LOG_DRV("UMPH: synthesized 1 Group Terminal Block from %u in / %u out MIDI1 jack(s)\r\n",
+  TU_LOG_USBH("UMPH: synthesized 1 Group Terminal Block from %u in / %u out MIDI1 jack(s)\r\n",
              p_ump->num_in_jacks, p_ump->num_out_jacks);
 }
 
@@ -208,7 +208,7 @@ static void umph_parse_endpoints(umph_interface_t* p_ump, uint8_t alt_setting,
       tusb_desc_endpoint_t const* desc_ep = (tusb_desc_endpoint_t const*) p_desc;
       uint8_t const ep_addr = desc_ep->bEndpointAddress;
 
-      TU_LOG_DRV("UMPH:   alt%u endpoint 0x%02x mps=%u\r\n", alt_setting, ep_addr,
+      TU_LOG_USBH("UMPH:   alt%u endpoint 0x%02x mps=%u\r\n", alt_setting, ep_addr,
                  tu_le16toh(desc_ep->wMaxPacketSize) & 0x07FF);
 
       if (alt_setting == 0)
@@ -257,7 +257,7 @@ static bool umph_parse_midistreaming(umph_interface_t* p_ump, tusb_desc_interfac
   uint16_t drv_len = *p_drv_len;
   uint8_t const* p_desc = *pp_desc;
 
-  TU_LOG_DRV("UMPH: MIDIStreaming itf_num=%u alt=%u num_ep=%u\r\n",
+  TU_LOG_USBH("UMPH: MIDIStreaming itf_num=%u alt=%u num_ep=%u\r\n",
              desc_ms->bInterfaceNumber, desc_ms->bAlternateSetting, desc_ms->bNumEndpoints);
 
   // CS interface header + jack/element descriptors for this alt setting
@@ -293,7 +293,7 @@ static bool umph_parse_midistreaming(umph_interface_t* p_ump, tusb_desc_interfac
       drv_len += tu_desc_len(p_desc);
       p_desc   = tu_desc_next(p_desc);
 
-      TU_LOG_DRV("UMPH: MIDIStreaming itf_num=%u alt=%u (native UMP) num_ep=%u\r\n",
+      TU_LOG_USBH("UMPH: MIDIStreaming itf_num=%u alt=%u (native UMP) num_ep=%u\r\n",
                  desc_alt1->bInterfaceNumber, desc_alt1->bAlternateSetting, desc_alt1->bNumEndpoints);
 
       // CS interface descriptors for alt-1 (typically none inline; GTB is fetched via control request)
@@ -324,7 +324,7 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
 
   TU_VERIFY(TUSB_CLASS_AUDIO == itf_desc->bInterfaceClass);
 
-  TU_LOG_DRV("UMPH: open daddr=%u itf_num=%u class=%u/%u/%u max_len=%u\r\n",
+  TU_LOG_USBH("UMPH: open daddr=%u itf_num=%u class=%u/%u/%u max_len=%u\r\n",
              dev_addr, itf_desc->bInterfaceNumber, itf_desc->bInterfaceClass,
              itf_desc->bInterfaceSubClass, itf_desc->bInterfaceProtocol, max_len);
 
@@ -371,7 +371,7 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
     return true;
   }
 
-  TU_LOG_DRV("UMPH: open() ignoring unrecognized AUDIO subclass %u\r\n", itf_desc->bInterfaceSubClass);
+  TU_LOG_USBH("UMPH: open() ignoring unrecognized AUDIO subclass %u\r\n", itf_desc->bInterfaceSubClass);
   return false;
 }
 
@@ -461,7 +461,7 @@ static void umph_finish_mount(umph_interface_t* p_ump)
   // real data-pump implementation (umph_xfer_cb translation logic) lands.
 
   p_ump->mounted = true;
-  TU_LOG_DRV("UMPH: daddr=%u itf_num=%u mounted, alt=%u ep_in=0x%02x ep_out=0x%02x gtb_count=%u\r\n",
+  TU_LOG_USBH("UMPH: daddr=%u itf_num=%u mounted, alt=%u ep_in=0x%02x ep_out=0x%02x gtb_count=%u\r\n",
              p_ump->daddr, p_ump->itf_num, p_ump->alt_setting, p_ump->ep_in, p_ump->ep_out, p_ump->num_gtb);
 
   if (tuh_ump_mount_cb) tuh_ump_mount_cb(p_ump->daddr, p_ump->itf_num);
@@ -503,7 +503,7 @@ static void umph_process_set_config(tuh_xfer_t* xfer)
       // fall back to synthesis rather than failing enumeration.
       if (xfer->result != XFER_RESULT_SUCCESS)
       {
-        TU_LOG_DRV("UMPH: GTB header fetch failed (result=%d), synthesizing from jacks\r\n", xfer->result);
+        TU_LOG_USBH("UMPH: GTB header fetch failed (result=%d), synthesizing from jacks\r\n", xfer->result);
         umph_synthesize_gtb_from_jacks(p_ump);
         umph_finish_mount(p_ump);
         break;
@@ -528,7 +528,7 @@ static void umph_process_set_config(tuh_xfer_t* xfer)
       }
       else
       {
-        TU_LOG_DRV("UMPH: GTB full fetch failed (result=%d), synthesizing from jacks\r\n", xfer->result);
+        TU_LOG_USBH("UMPH: GTB full fetch failed (result=%d), synthesizing from jacks\r\n", xfer->result);
         umph_synthesize_gtb_from_jacks(p_ump);
       }
       umph_finish_mount(p_ump);
@@ -578,7 +578,7 @@ bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint3
   umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
   TU_VERIFY(p_ump);
 
-  TU_LOG_DRV("UMPH: xfer_cb daddr=%u ep=0x%02x bytes=%lu\r\n", dev_addr, ep_addr, (unsigned long) xferred_bytes);
+  TU_LOG_USBH("UMPH: xfer_cb daddr=%u ep=0x%02x bytes=%lu\r\n", dev_addr, ep_addr, (unsigned long) xferred_bytes);
 
   // TODO(milestone 3): alt-1 native UMP raw pump -- apply UMP_WIRE_BSWAP32 at this boundary only.
   // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing ump_device.cpp's
