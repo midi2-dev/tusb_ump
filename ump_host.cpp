@@ -16,8 +16,14 @@
  *    verbose logging for bring-up against real hardware.
  *  - Raw diagnostic RX pump added: arms the initial IN read and re-arms on
  *    every completion, surfacing raw bytes via the new (diagnostic-only)
- *    tuh_ump_raw_rx_cb(). Real UMP/MIDI1 translation into the FIFO-backed
- *    tuh_ump_read()/write() API is still milestone 3/4.
+ *    tuh_ump_raw_rx_cb().
+ *  - Milestone 3: real FIFO-backed tuh_ump_read()/read_ntoh()/write()/
+ *    write_hton()/available()/writeable() for alt-setting-1 (native UMP),
+ *    mirroring ump_device.cpp's raw-wire-bytes-in-the-fifo /
+ *    swap-at-read-or-write-boundary approach (umph_prep_in_read() /
+ *    umph_write_flush(), analogous to _prep_out_transaction()/write_flush()).
+ *    Validated against real USB MIDI 2.0 UMP traffic on ProtoZOA hardware.
+ *    Alt-setting-0 MIDI1<->UMP translation is still milestone 4.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -84,9 +90,14 @@ typedef struct
 
   uint8_t  gtb_fetch_buf[UMPH_GTB_FETCH_BUFSIZE];
 
-  // Raw IN-endpoint transfer buffer. Diagnostic-only for now (see umph_xfer_cb) --
-  // milestone 3/4 replaces this with the real UMP/MIDI1-translation FIFO pump.
+  // Raw IN-endpoint transfer buffer, and (alt-1 native UMP only, for now --
+  // see umph_xfer_cb) the app-facing FIFO pump. Alt-0 MIDI1<->UMP
+  // translation into these same FIFOs is still milestone 4.
   uint8_t  ep_in_buf[CFG_TUH_UMP_EP_BUFSIZE];
+  uint8_t  ep_out_buf[CFG_TUH_UMP_EP_BUFSIZE];
+  tu_fifo_t rx_ff, tx_ff;
+  uint8_t  rx_ff_buf[CFG_TUH_UMP_RX_BUFSIZE];
+  uint8_t  tx_ff_buf[CFG_TUH_UMP_TX_BUFSIZE];
 
   bool     mounted;
 } umph_interface_t;
@@ -458,6 +469,48 @@ static bool umph_ctrl_set_alt_interface(uint8_t daddr, uint8_t itf_num, uint8_t 
   return tuh_control_xfer(&xfer);
 }
 
+// Arm the next IN read, but only if there's room in rx_ff for a full
+// EP_BUFSIZE chunk -- provides natural backpressure against a fast device
+// outrunning a slow reader. Mirrors ump_device.cpp's _prep_out_transaction(),
+// reversed (host reads FROM the device on ep_in, device reads FROM the host
+// on ep_out). Called after every IN completion and after every app read().
+static void umph_prep_in_read(umph_interface_t* p_ump)
+{
+  if (!p_ump->ep_in) return;
+
+  TU_VERIFY(tu_fifo_remaining(&p_ump->rx_ff) >= sizeof(p_ump->ep_in_buf), );
+  TU_VERIFY(usbh_edpt_claim(p_ump->daddr, p_ump->ep_in), );
+
+  if (tu_fifo_remaining(&p_ump->rx_ff) >= sizeof(p_ump->ep_in_buf))
+  {
+    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
+  }
+  else
+  {
+    usbh_edpt_release(p_ump->daddr, p_ump->ep_in);
+  }
+}
+
+// Pull queued tx_ff data out to the OUT endpoint. Mirrors ump_device.cpp's
+// write_flush(). Called after every app write() and after every OUT
+// completion (to keep draining a backlog one EP_BUFSIZE chunk at a time).
+static uint32_t umph_write_flush(umph_interface_t* p_ump)
+{
+  if (!p_ump->ep_out || !tu_fifo_count(&p_ump->tx_ff)) return 0;
+
+  TU_VERIFY(usbh_edpt_claim(p_ump->daddr, p_ump->ep_out), 0);
+
+  uint16_t count = tu_fifo_read_n(&p_ump->tx_ff, p_ump->ep_out_buf, sizeof(p_ump->ep_out_buf));
+  if (count)
+  {
+    TU_ASSERT(usbh_edpt_xfer(p_ump->daddr, p_ump->ep_out, p_ump->ep_out_buf, count), 0);
+    return count;
+  }
+
+  usbh_edpt_release(p_ump->daddr, p_ump->ep_out);
+  return 0;
+}
+
 static void umph_finish_mount(umph_interface_t* p_ump)
 {
   tusb_desc_endpoint_t const* desc_ep_in  = (p_ump->alt_setting == 1) ? &p_ump->desc_ep_in1  : &p_ump->desc_ep_in0;
@@ -474,13 +527,11 @@ static void umph_finish_mount(umph_interface_t* p_ump)
     p_ump->ep_out = desc_ep_out->bEndpointAddress;
   }
 
+  tu_fifo_config(&p_ump->rx_ff, p_ump->rx_ff_buf, CFG_TUH_UMP_RX_BUFSIZE, 1, false);
+  tu_fifo_config(&p_ump->tx_ff, p_ump->tx_ff_buf, CFG_TUH_UMP_TX_BUFSIZE, 1, false);
+
   // Arm the initial IN read so umph_xfer_cb() starts seeing incoming MIDI data.
-  // This is a raw diagnostic pump (see umph_xfer_cb) -- real UMP/MIDI1 translation
-  // into the app-facing FIFO API lands with milestone 3/4.
-  if (p_ump->ep_in)
-  {
-    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
-  }
+  umph_prep_in_read(p_ump);
 
   p_ump->mounted = true;
   TU_LOG_USBH("UMPH: daddr=%u itf_num=%u mounted, alt=%u ep_in=0x%02x ep_out=0x%02x gtb_count=%u\r\n",
@@ -606,15 +657,28 @@ bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint3
   {
     if (result == XFER_RESULT_SUCCESS && xferred_bytes > 0)
     {
-      // TODO(milestone 3): alt-1 native UMP raw pump -- apply UMP_WIRE_BSWAP32 at this boundary only.
-      // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing ump_device.cpp's
-      //                     tud_USBMIDI1ToUMP()/write-path logic adapted for the host role.
       if (tuh_ump_raw_rx_cb) tuh_ump_raw_rx_cb(dev_addr, p_ump->itf_num, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
+
+      if (p_ump->alt_setting == 1)
+      {
+        // Native UMP passthrough: store raw wire bytes as-is (no swap here --
+        // matches ump_device.cpp's rx_ff, which also holds raw wire bytes).
+        // UMP_WIRE_BSWAP32 is applied at read() time in tuh_ump_read_ntoh().
+        // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing
+        // ump_device.cpp's tud_USBMIDI1ToUMP() logic adapted for the host role.
+        tu_fifo_write_n(&p_ump->rx_ff, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
+      }
+
       if (tuh_ump_rx_cb) tuh_ump_rx_cb(dev_addr, p_ump->itf_num);
     }
 
-    // re-arm the next read regardless of result (a stall/error just means try again)
-    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
+    // re-arm the next read (a stall/error just means try again)
+    umph_prep_in_read(p_ump);
+  }
+  else if (ep_addr == p_ump->ep_out)
+  {
+    // keep draining any queued tx_ff backlog, one EP_BUFSIZE chunk at a time
+    umph_write_flush(p_ump);
   }
 
   return true;
@@ -685,43 +749,108 @@ uint8_t tuh_ump_get_group_terminal_blocks(uint8_t daddr, uint8_t itf_num,
   return p_ump->num_gtb;
 }
 
-// NOTE: available/writeable/read/write/read_ntoh/write_hton are stubbed to
-// compile cleanly against a mounted-but-not-yet-pumping interface; the real
-// FIFO-backed implementation lands with milestones 3/4 (data pump).
+// NOTE: alt-setting-0 (legacy MIDI1) devices return 0 from all of the
+// functions below -- their rx_ff/tx_ff are never populated/drained since
+// the MIDI1<->UMP translation pump is still milestone 4. Alt-setting-1
+// (native UMP) is fully implemented, mirroring ump_device.cpp's raw-wire-
+// bytes-in-the-fifo / swap-at-read-or-write-boundary approach.
+
 uint32_t tuh_ump_available(uint8_t daddr, uint8_t itf_num)
 {
-  (void) daddr; (void) itf_num;
-  return 0;
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  return (p_ump && p_ump->alt_setting == 1) ? tu_fifo_count(&p_ump->rx_ff) / 4 : 0;
 }
 
 uint32_t tuh_ump_writeable(uint8_t daddr, uint8_t itf_num)
 {
-  (void) daddr; (void) itf_num;
-  return 0;
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  return (p_ump && p_ump->alt_setting == 1) ? tu_fifo_remaining(&p_ump->tx_ff) / 4 : 0;
 }
 
+static uint16_t umph_read_impl(uint8_t daddr, uint8_t itf_num, uint32_t* pkts, uint16_t numAvail, bool hostOrder)
+{
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  if (!p_ump || p_ump->alt_setting != 1) return 0;
+
+  uint16_t numRead = 0;
+  uint8_t umpBuffer[4];
+
+  while (numRead < numAvail && tu_fifo_read_n(&p_ump->rx_ff, umpBuffer, 4) == 4)
+  {
+    // Wire format is little-endian (byte 0 = LSB, byte 3 = MT nibble) per USB
+    // MIDI 2.0 spec section 3.2.2; UMP_WIRE_BSWAP32 reconstructs the
+    // host-native arithmetic value (MT in bits 31:28) regardless of host
+    // endianness. Legacy raw callers get the byte-buffer reinterpretation
+    // (host-endian dependent), matching tud_ump_read()'s existing behavior.
+    pkts[numRead++] = hostOrder ? UMP_WIRE_BSWAP32(*(uint32_t*) umpBuffer) : *(uint32_t*) umpBuffer;
+  }
+
+  umph_prep_in_read(p_ump); // fifo has room again -- re-arm if we'd stalled on backpressure
+  return numRead;
+}
+
+// Legacy raw interface: words are reinterpreted from the wire byte buffer
+// with no endian conversion (host-endian dependent).
 uint16_t tuh_ump_read(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numAvail)
 {
-  (void) daddr; (void) itf_num; (void) words; (void) numAvail;
-  return 0;
+  return umph_read_impl(daddr, itf_num, words, numAvail, false);
 }
 
+// Portable interface: each returned word is the host-native uint32_t whose
+// arithmetic value matches the UMP wire word (bits 31:28 = message type).
+// Recommended for new code.
 uint16_t tuh_ump_read_ntoh(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numAvail)
 {
-  (void) daddr; (void) itf_num; (void) words; (void) numAvail;
-  return 0;
+  return umph_read_impl(daddr, itf_num, words, numAvail, true);
 }
 
+static uint16_t umph_write_impl(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numWords, bool hostOrder)
+{
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  if (!p_ump || p_ump->alt_setting != 1) return 0;
+
+  uint16_t const numAvailable = tu_fifo_remaining(&p_ump->tx_ff) / 4;
+  uint16_t const numProcessed = (numAvailable < numWords) ? numAvailable : numWords;
+
+  if (hostOrder)
+  {
+    // words[] is numeric (host-native order, MT in bits 31:28); the wire
+    // needs little-endian byte order (byte 0 = LSB, byte 3 = MT nibble) per
+    // USB MIDI 2.0 spec section 3.2.2. Swap in fixed-size batches, matching
+    // ump_device.cpp's tud_ump_write_impl() native-passthrough branch.
+    uint32_t wireWords[16];
+    uint16_t offset = 0, remaining = numProcessed;
+    while (remaining)
+    {
+      uint16_t chunk = (remaining < TU_ARRAY_SIZE(wireWords)) ? remaining : TU_ARRAY_SIZE(wireWords);
+      for (uint16_t i = 0; i < chunk; i++) wireWords[i] = UMP_WIRE_BSWAP32(words[offset + i]);
+      tu_fifo_write_n(&p_ump->tx_ff, wireWords, chunk * 4);
+      offset += chunk;
+      remaining -= chunk;
+    }
+  }
+  else
+  {
+    // Legacy raw reinterpretation (host-endian dependent).
+    tu_fifo_write_n(&p_ump->tx_ff, words, numProcessed * 4);
+  }
+
+  umph_write_flush(p_ump);
+  return numProcessed;
+}
+
+// Legacy raw interface: words[] is reinterpreted onto the wire with no
+// endian conversion (host-endian dependent).
 uint16_t tuh_ump_write(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numWords)
 {
-  (void) daddr; (void) itf_num; (void) words; (void) numWords;
-  return 0;
+  return umph_write_impl(daddr, itf_num, words, numWords, false);
 }
 
+// Portable interface: words[] must be the host-native uint32_t numeric value
+// of each UMP word (bits 31:28 = message type). Recommended for new code.
 uint16_t tuh_ump_write_hton(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numWords)
 {
-  (void) daddr; (void) itf_num; (void) words; (void) numWords;
-  return 0;
+  return umph_write_impl(daddr, itf_num, words, numWords, true);
 }
 
 //--------------------------------------------------------------------+
