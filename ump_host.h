@@ -23,10 +23,12 @@
  * shim will be needed -- see ump_device.cpp's USBD version-compat shim for
  * the pattern to follow.
  *
- * UMP Host Driver Version 0.1 - 2026-08-26
- *  - Initial host-side UMP class driver skeleton: enumeration, alt-setting
- *    selection, Group Terminal Block descriptor fetch/synthesis, logging.
- *    Data pump (xfer_cb) intentionally deferred to a later milestone.
+ * UMP Host Driver Version 0.2 - 2026-08-27
+ *  - Enumeration, alt-setting selection, Group Terminal Block descriptor
+ *    fetch/synthesis, and a full FIFO-backed UMP data pump for both
+ *    alt-setting-1 (native UMP passthrough) and alt-setting-0 (legacy USB
+ *    MIDI 1.0, translated to/from UMP including SysEx7 reassembly). See
+ *    ump_host.cpp's version comment for the milestone-by-milestone history.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal

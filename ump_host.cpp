@@ -23,7 +23,13 @@
  *    swap-at-read-or-write-boundary approach (umph_prep_in_read() /
  *    umph_write_flush(), analogous to _prep_out_transaction()/write_flush()).
  *    Validated against real USB MIDI 2.0 UMP traffic on ProtoZOA hardware.
- *    Alt-setting-0 MIDI1<->UMP translation is still milestone 4.
+ *  - Milestone 4: alt-setting-0 (legacy USB MIDI 1.0) <-> UMP translation,
+ *    ported from ump_device.cpp's tud_USBMIDI1ToUMP() (RX) and
+ *    tud_ump_write_impl()'s alt-0 branch (TX, including the per-cable
+ *    SysEx7 ring-buffer reassembly). rx_ff/tx_ff now always hold raw wire
+ *    bytes regardless of alt setting; translation happens lazily at
+ *    read()/write() call time for both alt settings, matching the device
+ *    driver's design.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -66,6 +72,32 @@
 // CFG_TUH_UMP_MAX_GTB regardless of what a device claims in wTotalLength.
 #define UMPH_GTB_FETCH_BUFSIZE  256
 
+// Alt-setting-0 (legacy MIDI1) <-> UMP translation types, ported verbatim
+// from ump_device.cpp -- pure byte-level conversion, no device/host role
+// dependence. See umph_USBMIDI1ToUMP() below for attribution.
+typedef struct
+{
+  uint8_t   wordCount;
+  union ump_host
+  {
+    uint32_t  umpWords[4];
+    uint8_t   umpBytes[sizeof(uint32_t) * 4];
+  } umpData;
+} UMPH_PACKET, *PUMPH_PACKET;
+
+// Structure to aid in UMP SYSEX to USB MIDI 1.0 (per-cable ring buffer of
+// pending SysEx7 bytes awaiting repacking into 3-byte USB MIDI1 CIN packets)
+#define UMPH_SYSEX_BS_RB_SIZE 16
+typedef struct
+{
+  bool    inSysex;
+  uint8_t sysexBS[UMPH_SYSEX_BS_RB_SIZE];
+  uint8_t usbMIDI1Tail;
+  uint8_t usbMIDI1Head;
+} UMPH_TO_MIDI1_SYSEX;
+
+#define UMPH_MAX_NUM_GROUPS_CABLES 16
+
 typedef struct
 {
   uint8_t  daddr;
@@ -84,6 +116,10 @@ typedef struct
 
   uint8_t  num_in_jacks, num_out_jacks; // alt-0 jack descriptor tally, for GTB synthesis
   uint16_t bcdMSC0, bcdMSC1;             // MIDIStreaming class spec version per alt setting, 0 if not seen
+
+  // Alt-setting-0 (legacy MIDI1) <-> UMP translation state, per virtual cable/group
+  bool                 midi1_rx_is_in_sysex[UMPH_MAX_NUM_GROUPS_CABLES];
+  UMPH_TO_MIDI1_SYSEX  midi1_tx_sysex[UMPH_MAX_NUM_GROUPS_CABLES];
 
   uint8_t  num_gtb;
   midi2_desc_group_terminal_block_t gtb[CFG_TUH_UMP_MAX_GTB];
@@ -641,9 +677,12 @@ bool umph_set_config(uint8_t dev_addr, uint8_t itf_num)
 }
 
 //--------------------------------------------------------------------+
-// TRANSFER CALLBACK (raw diagnostic pump -- see milestones 3/4 for the
-// real UMP/MIDI1 translation into the app-facing FIFO read/write API)
+// TRANSFER CALLBACK
 //--------------------------------------------------------------------+
+// rx_ff always holds raw wire bytes regardless of alt setting -- exactly
+// like ump_device.cpp's umpd_xfer_cb(). Both native UMP passthrough
+// (UMP_WIRE_BSWAP32) and alt-0 MIDI1->UMP translation (umph_USBMIDI1ToUMP())
+// happen lazily at read() time, not here.
 
 bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
 {
@@ -659,15 +698,7 @@ bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint3
     {
       if (tuh_ump_raw_rx_cb) tuh_ump_raw_rx_cb(dev_addr, p_ump->itf_num, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
 
-      if (p_ump->alt_setting == 1)
-      {
-        // Native UMP passthrough: store raw wire bytes as-is (no swap here --
-        // matches ump_device.cpp's rx_ff, which also holds raw wire bytes).
-        // UMP_WIRE_BSWAP32 is applied at read() time in tuh_ump_read_ntoh().
-        // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing
-        // ump_device.cpp's tud_USBMIDI1ToUMP() logic adapted for the host role.
-        tu_fifo_write_n(&p_ump->rx_ff, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
-      }
+      tu_fifo_write_n(&p_ump->rx_ff, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
 
       if (tuh_ump_rx_cb) tuh_ump_rx_cb(dev_addr, p_ump->itf_num);
     }
@@ -713,6 +744,222 @@ void umph_close(uint8_t dev_addr)
 }
 
 //--------------------------------------------------------------------+
+// ALT-SETTING-0 (LEGACY MIDI1) <-> UMP TRANSLATION
+//--------------------------------------------------------------------+
+
+// Helper routine to handle conversion of a USB MIDI 1.0 32-bit word packet
+// to UMP formatted packet. Only populates UMP message types 1 (System), 2
+// (MIDI 1.0 Channel Voice), and 3 (64-bit data / SysEx7) -- ported verbatim
+// (pure byte-level conversion, no device/host role dependence) from
+// ump_device.cpp's tud_USBMIDI1ToUMP(), which itself was refined from the
+// USB MIDI 2.0 Host Driver developed as open source to be included in
+// Windows by the Association of Musical Electronics Industry.
+//
+// Copyright 2023 Association of Musical Electronics Industry
+// Copyright 2023 Microsoft
+// Driver source code developed by AmeNote. Some components Copyright 2023 AmeNote Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+static bool umph_USBMIDI1ToUMP(uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMPH_PACKET umpPkt)
+{
+  if (!usbMidi1Pkt || !pbIsInSysex || !umpPkt) return false;
+
+  uint8_t* pBuffer = (uint8_t*) &usbMidi1Pkt;
+  umpPkt->wordCount = 0;
+
+  uint8_t cbl_num = (pBuffer[0] & 0xf0) >> 4;
+  uint8_t code_index = pBuffer[0] & 0x0f;
+
+  if (code_index == MIDI_1_CIN_1BYTE_DATA && (pBuffer[1] & 0x80))
+  {
+    switch (pBuffer[1])
+    {
+      case UMP_SYSTEM_TUNE_REQ:
+      case UMP_SYSTEM_TIMING_CLK:
+      case UMP_SYSTEM_START:
+      case UMP_SYSTEM_CONTINUE:
+      case UMP_SYSTEM_STOP:
+      case UMP_SYSTEM_ACTIVE_SENSE:
+      case UMP_SYSTEM_RESET:
+      case UMP_SYSTEM_UNDEFINED_F4:
+      case UMP_SYSTEM_UNDEFINED_F5:
+      case UMP_SYSTEM_UNDEFINED_F9:
+      case UMP_SYSTEM_UNDEFINED_FD:
+        code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
+        break;
+      default:
+        break;
+    }
+  }
+
+  uint8_t firstByte = 1;
+  uint8_t lastByte = 4;
+  uint8_t copyPos;
+
+  switch (code_index)
+  {
+    case MIDI_1_CIN_SYSEX_START: // or continue
+      if (!*pbIsInSysex)
+      {
+        if (pBuffer[1] != MIDI_1_STATUS_SYSEX_START) return false;
+        firstByte = 2;
+        lastByte = 4;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_START | 2;
+        *pbIsInSysex = true;
+      }
+      else
+      {
+        firstByte = 1;
+        lastByte = 4;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_CONTINUE | 3;
+      }
+
+      umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+      umpPkt->wordCount = 2;
+      copyPos = firstByte;
+      for (uint8_t count = 2; count < 8; count++)
+      {
+        umpPkt->umpData.umpBytes[count] = (copyPos < lastByte) ? pBuffer[copyPos++] : 0x00;
+      }
+      break;
+
+    case MIDI_1_CIN_SYSEX_END_1BYTE: // or single byte System Common
+      if ((pBuffer[1] & 0x80) && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
+      {
+        umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
+        umpPkt->umpData.umpBytes[1] = pBuffer[1];
+        firstByte = 1;
+        lastByte = 1;
+        goto COMPLETE_1BYTE;
+      }
+
+      umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+      if (*pbIsInSysex)
+      {
+        if (pBuffer[1] != MIDI_1_STATUS_SYSEX_END) return false;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 0;
+        *pbIsInSysex = false;
+        firstByte = 1;
+        lastByte = 1;
+      }
+      else
+      {
+        return false; // should not get here
+      }
+
+COMPLETE_1BYTE:
+      umpPkt->wordCount = 2;
+      copyPos = firstByte;
+      for (uint8_t count = 2; count < 8; count++)
+      {
+        umpPkt->umpData.umpBytes[count] = (copyPos < lastByte) ? pBuffer[copyPos++] : 0x00;
+      }
+      break;
+
+    case MIDI_1_CIN_SYSEX_END_2BYTE:
+      umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+      if (*pbIsInSysex)
+      {
+        if (pBuffer[2] != MIDI_1_STATUS_SYSEX_END) return false;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 1;
+        *pbIsInSysex = false;
+        firstByte = 1;
+        lastByte = 2;
+      }
+      else
+      {
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 0;
+        *pbIsInSysex = false;
+        firstByte = 1;
+        lastByte = 1;
+      }
+
+      umpPkt->wordCount = 2;
+      copyPos = firstByte;
+      for (uint8_t count = 2; count < 8; count++)
+      {
+        umpPkt->umpData.umpBytes[count] = (copyPos < lastByte) ? pBuffer[copyPos++] : 0x00;
+      }
+      break;
+
+    case MIDI_1_CIN_SYSEX_END_3BYTE:
+      umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
+
+      if (*pbIsInSysex)
+      {
+        if (pBuffer[3] != MIDI_1_STATUS_SYSEX_END) return false;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_END | 2;
+        *pbIsInSysex = false;
+        firstByte = 1;
+        lastByte = 3;
+      }
+      else
+      {
+        if (pBuffer[1] != MIDI_1_STATUS_SYSEX_START || pBuffer[3] != MIDI_1_STATUS_SYSEX_END) return false;
+        umpPkt->umpData.umpBytes[1] = UMP_SYSEX7_COMPLETE | 1;
+        *pbIsInSysex = false;
+        firstByte = 2;
+        lastByte = 3;
+      }
+
+      umpPkt->wordCount = 2;
+      copyPos = firstByte;
+      for (uint8_t count = 2; count < 8; count++)
+      {
+        umpPkt->umpData.umpBytes[count] = (copyPos < lastByte) ? pBuffer[copyPos++] : 0x00;
+      }
+      break;
+
+    // MIDI1 Channel Voice Messages
+    case MIDI_1_CIN_NOTE_ON:
+    case MIDI_1_CIN_NOTE_OFF:
+    case MIDI_1_CIN_POLY_KEYPRESS:
+    case MIDI_1_CIN_CONTROL_CHANGE:
+    case MIDI_1_CIN_PROGRAM_CHANGE:
+    case MIDI_1_CIN_CHANNEL_PRESSURE:
+    case MIDI_1_CIN_PITCH_BEND_CHANGE:
+      umpPkt->umpData.umpBytes[0] = UMP_MT_MIDI1_CV | cbl_num;
+      *pbIsInSysex = false; // ensure we end any current sysex packets, other layers need to handle error
+      for (int count = 1; count < 4; count++) umpPkt->umpData.umpBytes[count] = pBuffer[count];
+      umpPkt->wordCount = 1;
+      break;
+
+    case MIDI_1_CIN_SYSCOM_2BYTE:
+    case MIDI_1_CIN_SYSCOM_3BYTE:
+      umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
+      for (int count = 1; count < 4; count++) umpPkt->umpData.umpBytes[count] = pBuffer[count];
+      umpPkt->wordCount = 1;
+      break;
+
+    case MIDI_1_CIN_MISC:
+    case MIDI_1_CIN_CABLE_EVENT:
+      // Reserved for future use, not translated
+    default:
+      return false;
+  }
+
+  return true;
+}
+
+//--------------------------------------------------------------------+
 // APPLICATION API
 //--------------------------------------------------------------------+
 
@@ -749,40 +996,71 @@ uint8_t tuh_ump_get_group_terminal_blocks(uint8_t daddr, uint8_t itf_num,
   return p_ump->num_gtb;
 }
 
-// NOTE: alt-setting-0 (legacy MIDI1) devices return 0 from all of the
-// functions below -- their rx_ff/tx_ff are never populated/drained since
-// the MIDI1<->UMP translation pump is still milestone 4. Alt-setting-1
-// (native UMP) is fully implemented, mirroring ump_device.cpp's raw-wire-
-// bytes-in-the-fifo / swap-at-read-or-write-boundary approach.
+// NOTE: like ump_device.cpp's tud_ump_n_available()/n_writeable(), these
+// report raw fifo occupancy / 4, which is only an approximation of true UMP
+// word count for alt-setting-0 (a single 4-byte fifo entry can translate to
+// 0, 1, or 2 UMP words) -- an accepted imprecision inherited from the
+// device driver's existing behavior, not something introduced here.
 
 uint32_t tuh_ump_available(uint8_t daddr, uint8_t itf_num)
 {
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
-  return (p_ump && p_ump->alt_setting == 1) ? tu_fifo_count(&p_ump->rx_ff) / 4 : 0;
+  return p_ump ? tu_fifo_count(&p_ump->rx_ff) / 4 : 0;
 }
 
 uint32_t tuh_ump_writeable(uint8_t daddr, uint8_t itf_num)
 {
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
-  return (p_ump && p_ump->alt_setting == 1) ? tu_fifo_remaining(&p_ump->tx_ff) / 4 : 0;
+  return p_ump ? tu_fifo_remaining(&p_ump->tx_ff) / 4 : 0;
 }
 
 static uint16_t umph_read_impl(uint8_t daddr, uint8_t itf_num, uint32_t* pkts, uint16_t numAvail, bool hostOrder)
 {
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
-  if (!p_ump || p_ump->alt_setting != 1) return 0;
+  if (!p_ump) return 0;
 
   uint16_t numRead = 0;
-  uint8_t umpBuffer[4];
 
-  while (numRead < numAvail && tu_fifo_read_n(&p_ump->rx_ff, umpBuffer, 4) == 4)
+  if (p_ump->alt_setting == 1)
   {
-    // Wire format is little-endian (byte 0 = LSB, byte 3 = MT nibble) per USB
-    // MIDI 2.0 spec section 3.2.2; UMP_WIRE_BSWAP32 reconstructs the
-    // host-native arithmetic value (MT in bits 31:28) regardless of host
-    // endianness. Legacy raw callers get the byte-buffer reinterpretation
-    // (host-endian dependent), matching tud_ump_read()'s existing behavior.
-    pkts[numRead++] = hostOrder ? UMP_WIRE_BSWAP32(*(uint32_t*) umpBuffer) : *(uint32_t*) umpBuffer;
+    uint8_t umpBuffer[4];
+    while (numRead < numAvail && tu_fifo_read_n(&p_ump->rx_ff, umpBuffer, 4) == 4)
+    {
+      // Wire format is little-endian (byte 0 = LSB, byte 3 = MT nibble) per
+      // USB MIDI 2.0 spec section 3.2.2; UMP_WIRE_BSWAP32 reconstructs the
+      // host-native arithmetic value (MT in bits 31:28) regardless of host
+      // endianness. Legacy raw callers get the byte-buffer reinterpretation
+      // (host-endian dependent), matching tud_ump_read()'s existing behavior.
+      pkts[numRead++] = hostOrder ? UMP_WIRE_BSWAP32(*(uint32_t*) umpBuffer) : *(uint32_t*) umpBuffer;
+    }
+  }
+  else
+  {
+    // Legacy MIDI1: rx_ff holds raw 4-byte USB-MIDI1 CIN packets; translate
+    // to UMP here (lazily, at read time), mirroring ump_device.cpp's
+    // tud_ump_read_impl() alt-0 branch exactly, including the 2-word
+    // headroom (a single CIN packet can expand to a 2-word SysEx7 UMP msg).
+    uint16_t numProcessed = 0;
+    while ((numAvail - numProcessed) >= 2)
+    {
+      uint32_t readWord;
+      if (tu_fifo_read_n(&p_ump->rx_ff, (void*) &readWord, sizeof(uint32_t)) != sizeof(uint32_t)) break;
+      numProcessed++;
+
+      if (readWord)
+      {
+        uint8_t cbl_num = (((uint8_t*) &readWord)[0] & 0xf0) >> 4;
+        UMPH_PACKET pkt;
+        if (umph_USBMIDI1ToUMP(readWord, &p_ump->midi1_rx_is_in_sysex[cbl_num], &pkt))
+        {
+          for (uint8_t count = 0; count < pkt.wordCount; count++)
+          {
+            uint32_t word = pkt.umpData.umpWords[count];
+            pkts[numRead++] = hostOrder ? UMP_HOST_BSWAP32(word) : word;
+          }
+        }
+      }
+    }
   }
 
   umph_prep_in_read(p_ump); // fifo has room again -- re-arm if we'd stalled on backpressure
@@ -807,32 +1085,252 @@ uint16_t tuh_ump_read_ntoh(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint
 static uint16_t umph_write_impl(uint8_t daddr, uint8_t itf_num, uint32_t* words, uint16_t numWords, bool hostOrder)
 {
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
-  if (!p_ump || p_ump->alt_setting != 1) return 0;
+  if (!p_ump) return 0;
 
-  uint16_t const numAvailable = tu_fifo_remaining(&p_ump->tx_ff) / 4;
-  uint16_t const numProcessed = (numAvailable < numWords) ? numAvailable : numWords;
+  uint16_t numProcessed = 0;
 
-  if (hostOrder)
+  if (p_ump->alt_setting == 1)
   {
-    // words[] is numeric (host-native order, MT in bits 31:28); the wire
-    // needs little-endian byte order (byte 0 = LSB, byte 3 = MT nibble) per
-    // USB MIDI 2.0 spec section 3.2.2. Swap in fixed-size batches, matching
-    // ump_device.cpp's tud_ump_write_impl() native-passthrough branch.
-    uint32_t wireWords[16];
-    uint16_t offset = 0, remaining = numProcessed;
-    while (remaining)
+    uint16_t const numAvailable = tu_fifo_remaining(&p_ump->tx_ff) / 4;
+    numProcessed = (numAvailable < numWords) ? numAvailable : numWords;
+
+    if (hostOrder)
     {
-      uint16_t chunk = (remaining < TU_ARRAY_SIZE(wireWords)) ? remaining : TU_ARRAY_SIZE(wireWords);
-      for (uint16_t i = 0; i < chunk; i++) wireWords[i] = UMP_WIRE_BSWAP32(words[offset + i]);
-      tu_fifo_write_n(&p_ump->tx_ff, wireWords, chunk * 4);
-      offset += chunk;
-      remaining -= chunk;
+      // words[] is numeric (host-native order, MT in bits 31:28); the wire
+      // needs little-endian byte order (byte 0 = LSB, byte 3 = MT nibble) per
+      // USB MIDI 2.0 spec section 3.2.2. Swap in fixed-size batches, matching
+      // ump_device.cpp's tud_ump_write_impl() native-passthrough branch.
+      uint32_t wireWords[16];
+      uint16_t offset = 0, remaining = numProcessed;
+      while (remaining)
+      {
+        uint16_t chunk = (remaining < TU_ARRAY_SIZE(wireWords)) ? remaining : TU_ARRAY_SIZE(wireWords);
+        for (uint16_t i = 0; i < chunk; i++) wireWords[i] = UMP_WIRE_BSWAP32(words[offset + i]);
+        tu_fifo_write_n(&p_ump->tx_ff, wireWords, chunk * 4);
+        offset += chunk;
+        remaining -= chunk;
+      }
+    }
+    else
+    {
+      // Legacy raw reinterpretation (host-endian dependent).
+      tu_fifo_write_n(&p_ump->tx_ff, words, numProcessed * 4);
     }
   }
   else
   {
-    // Legacy raw reinterpretation (host-endian dependent).
-    tu_fifo_write_n(&p_ump->tx_ff, words, numProcessed * 4);
+    // Legacy MIDI1: translate UMP -> USB-MIDI1 CIN packets (with per-cable
+    // SysEx7 ring-buffer reassembly), mirroring ump_device.cpp's
+    // tud_ump_write_impl() alt-0 branch.
+    UMPH_PACKET umpPacket;
+    UMPH_PACKET umpWritePacket;
+
+    while (numProcessed < numWords)
+    {
+      umpPacket.wordCount = 0;
+      umpPacket.umpData.umpWords[0] = hostOrder ? UMP_HOST_BSWAP32(words[numProcessed]) : words[numProcessed];
+
+      switch (umpPacket.umpData.umpBytes[0] & UMP_MT_MASK)
+      {
+        case UMP_MT_UTILITY:
+        case UMP_MT_SYSTEM:
+        case UMP_MT_MIDI1_CV:
+        case UMP_MT_RESERVED_6:
+        case UMP_MT_RESERVED_7:
+          umpPacket.wordCount = 1;
+          break;
+
+        case UMP_MT_DATA_64:
+        case UMP_MT_MIDI2_CV:
+        case UMP_MT_RESERVED_8:
+        case UMP_MT_RESERVED_9:
+        case UMP_MT_RESERVED_A:
+          umpPacket.wordCount = 2;
+          break;
+
+        case UMP_MT_RESERVED_B:
+        case UMP_MT_RESERVED_C:
+          umpPacket.wordCount = 3;
+          break;
+
+        case UMP_MT_DATA_128:
+        case UMP_MT_FLEX_128:
+        case UMP_MT_STREAM_128:
+        case UMP_MT_RESERVED_E:
+          umpPacket.wordCount = 4;
+          break;
+
+        default:
+          numProcessed++;
+          continue;
+      }
+
+      if ((numWords - numProcessed) < umpPacket.wordCount) break; // not enough data this call
+
+      for (int count = 1; count < umpPacket.wordCount; count++)
+      {
+        umpPacket.umpData.umpWords[count] =
+          hostOrder ? UMP_HOST_BSWAP32(words[numProcessed + count]) : words[numProcessed + count];
+      }
+
+      uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK;
+      uint8_t mtVal = umpPacket.umpData.umpBytes[0] & UMP_MT_MASK;
+      umpWritePacket.wordCount = 0;
+
+      switch (mtVal)
+      {
+        case UMP_MT_SYSTEM:
+          umpWritePacket.wordCount = 1;
+          switch (umpPacket.umpData.umpBytes[1])
+          {
+            case UMP_SYSTEM_TUNE_REQ:
+            case UMP_SYSTEM_TIMING_CLK:
+            case UMP_SYSTEM_START:
+            case UMP_SYSTEM_CONTINUE:
+            case UMP_SYSTEM_STOP:
+            case UMP_SYSTEM_ACTIVE_SENSE:
+            case UMP_SYSTEM_RESET:
+            case UMP_SYSTEM_UNDEFINED_F4:
+            case UMP_SYSTEM_UNDEFINED_F5:
+            case UMP_SYSTEM_UNDEFINED_F9:
+            case UMP_SYSTEM_UNDEFINED_FD:
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSEX_END_1BYTE;
+              break;
+            case UMP_SYSTEM_MTC:
+            case UMP_SYSTEM_SONG_SELECT:
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSCOM_2BYTE;
+              break;
+            case UMP_SYSTEM_SONG_POS_PTR:
+              umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | MIDI_1_CIN_SYSCOM_3BYTE;
+              break;
+            default:
+              umpWritePacket.wordCount = 0;
+              break;
+          }
+          for (int count = 1; count < 4; count++)
+          {
+            umpWritePacket.umpData.umpBytes[count] = umpPacket.umpData.umpBytes[count];
+          }
+          break;
+
+        case UMP_MT_MIDI1_CV:
+          umpWritePacket.wordCount = 1;
+          umpWritePacket.umpData.umpBytes[0] = (cbl_num << 4) | ((umpPacket.umpData.umpBytes[1] & 0xf0) >> 4);
+          for (int count = 1; count < 4; count++)
+          {
+            umpWritePacket.umpData.umpBytes[count] = umpPacket.umpData.umpBytes[count];
+          }
+          break;
+
+        case UMP_MT_DATA_64:
+        {
+          bool bEnterSysex = false;
+          bool bEndSysex = false;
+
+          switch (umpPacket.umpData.umpBytes[1] & UMP_SYSEX7_STATUS_MASK)
+          {
+            case UMP_SYSEX7_COMPLETE:
+              bEnterSysex = true;
+              // fallthrough
+            case UMP_SYSEX7_END:
+              bEndSysex = true;
+              break;
+            case UMP_SYSEX7_START:
+              bEnterSysex = true;
+              break;
+            default:
+              break;
+          }
+
+          UMPH_TO_MIDI1_SYSEX* sx = &p_ump->midi1_tx_sysex[cbl_num];
+
+          if (bEnterSysex && sx->inSysex) sx->inSysex = false;
+          if (bEnterSysex && !sx->inSysex)
+          {
+            sx->usbMIDI1Head = 0;
+            sx->usbMIDI1Tail = 0;
+            sx->inSysex = true;
+          }
+
+          uint8_t byteStream[UMPH_SYSEX_BS_RB_SIZE];
+          uint8_t sysexStatus = (umpPacket.umpData.umpBytes[1] >> 4);
+          uint8_t numberBytes = 0;
+
+          if (sysexStatus <= 1 && numberBytes < UMPH_SYSEX_BS_RB_SIZE)
+          {
+            byteStream[numberBytes++] = MIDI_1_STATUS_SYSEX_START;
+          }
+          for (uint8_t count = 0; count < (umpPacket.umpData.umpBytes[1] & 0xf); count++)
+          {
+            if (numberBytes < UMPH_SYSEX_BS_RB_SIZE) byteStream[numberBytes++] = umpPacket.umpData.umpBytes[2 + count];
+          }
+          if ((sysexStatus == 0 || sysexStatus == 3) && numberBytes < UMPH_SYSEX_BS_RB_SIZE)
+          {
+            byteStream[numberBytes++] = MIDI_1_STATUS_SYSEX_END;
+          }
+
+          for (uint8_t count = 0; count < numberBytes; count++)
+          {
+            sx->sysexBS[sx->usbMIDI1Head++] = byteStream[count];
+            sx->usbMIDI1Head %= UMPH_SYSEX_BS_RB_SIZE;
+          }
+
+          numberBytes = (sx->usbMIDI1Head > sx->usbMIDI1Tail)
+              ? sx->usbMIDI1Head - sx->usbMIDI1Tail
+              : (UMPH_SYSEX_BS_RB_SIZE - sx->usbMIDI1Tail) + sx->usbMIDI1Head;
+
+          umpWritePacket.wordCount = 0;
+          while (numberBytes && umpWritePacket.wordCount < 4)
+          {
+            umpWritePacket.umpData.umpWords[umpWritePacket.wordCount] = 0;
+
+            if (numberBytes > 2)
+            {
+              uint8_t* pumpBytes = (uint8_t*) &umpWritePacket.umpData.umpWords[umpWritePacket.wordCount];
+              for (uint8_t count = 0; count < 3; count++)
+              {
+                pumpBytes[count + 1] = sx->sysexBS[sx->usbMIDI1Tail++];
+                sx->usbMIDI1Tail %= UMPH_SYSEX_BS_RB_SIZE;
+                numberBytes--;
+              }
+              pumpBytes[0] = (bEndSysex && !numberBytes)
+                  ? (uint8_t) (cbl_num << 4) | MIDI_1_CIN_SYSEX_END_3BYTE
+                  : (uint8_t) (cbl_num << 4) | MIDI_1_CIN_SYSEX_START;
+            }
+            else if (bEndSysex)
+            {
+              uint8_t* pumpBytes = (uint8_t*) &umpWritePacket.umpData.umpWords[umpWritePacket.wordCount];
+              uint8_t count;
+              for (count = 0; numberBytes; count++)
+              {
+                pumpBytes[count + 1] = sx->sysexBS[sx->usbMIDI1Tail++];
+                sx->usbMIDI1Tail %= UMPH_SYSEX_BS_RB_SIZE;
+                numberBytes--;
+              }
+              pumpBytes[0] = (count == 1)
+                  ? (uint8_t) (cbl_num << 4) | MIDI_1_CIN_SYSEX_END_1BYTE
+                  : (uint8_t) (cbl_num << 4) | MIDI_1_CIN_SYSEX_END_2BYTE;
+            }
+            else
+            {
+              break;
+            }
+            umpWritePacket.wordCount++;
+          }
+          break;
+        }
+
+        default:
+          numProcessed += umpPacket.wordCount; // ignore this UMP packet as corrupted
+          umpWritePacket.wordCount = 0;
+      }
+
+      if (umpWritePacket.wordCount)
+      {
+        numProcessed += umpPacket.wordCount;
+        tu_fifo_write_n(&p_ump->tx_ff, (void*) &umpWritePacket.umpData.umpBytes[0], umpWritePacket.wordCount * 4);
+      }
+    }
   }
 
   umph_write_flush(p_ump);
