@@ -123,6 +123,11 @@ uint16_t tuh_ump_read_ntoh   (uint8_t daddr, uint8_t itf_num, uint32_t *words, u
 // Get the currently active alternate setting (0 = legacy MIDI 1.0, 1 = native UMP)
 uint8_t  tuh_ump_alt_setting (uint8_t daddr, uint8_t itf_num);
 
+// Get the MIDIStreaming class-specific interface header's bcdMSC (class spec
+// version, e.g. 0x0100) for the currently active alt setting. Returns 0 if
+// the device had no CS interface header descriptor for that alt setting.
+uint16_t tuh_ump_get_bcd_msc (uint8_t daddr, uint8_t itf_num);
+
 // Get the parsed (or, for alt-setting-0-only devices, synthesized) Group
 // Terminal Block entries for an interface. Returns the number of entries
 // and, if gtb_array_out is non-NULL, points it at the internal array
@@ -142,6 +147,14 @@ TU_ATTR_WEAK void tuh_ump_umount_cb (uint8_t daddr, uint8_t itf_num);
 
 // Invoked when new UMP data has been received
 TU_ATTR_WEAK void tuh_ump_rx_cb     (uint8_t daddr, uint8_t itf_num);
+
+// DIAGNOSTIC ONLY (milestone 1/2 bring-up): invoked with the raw bytes read off
+// the IN endpoint, before any UMP/MIDI1 translation -- for alt-setting-0 devices
+// this is raw 4-byte USB-MIDI1.0 CIN packets; for alt-setting-1 this is raw
+// little-endian UMP words. `data` is only valid for the duration of the call.
+// Superseded by tuh_ump_read()/tuh_ump_read_ntoh() once the real FIFO-backed
+// data pump lands (see project plan milestones 3/4).
+TU_ATTR_WEAK void tuh_ump_raw_rx_cb (uint8_t daddr, uint8_t itf_num, uint8_t const* data, uint16_t len);
 
 //--------------------------------------------------------------------+
 // Internal Class Driver API

@@ -14,8 +14,10 @@
  *    legacy alt-setting-0), Group Terminal Block descriptor fetch (alt-1) or
  *    synthesis from MIDI 1.0 jack descriptors (alt-0-only devices), all with
  *    verbose logging for bring-up against real hardware.
- *  - Data pump (umph_xfer_cb real translation) intentionally left as a
- *    logging stub -- see milestones 3/4 in the project plan.
+ *  - Raw diagnostic RX pump added: arms the initial IN read and re-arms on
+ *    every completion, surfacing raw bytes via the new (diagnostic-only)
+ *    tuh_ump_raw_rx_cb(). Real UMP/MIDI1 translation into the FIFO-backed
+ *    tuh_ump_read()/write() API is still milestone 3/4.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -75,11 +77,16 @@ typedef struct
   bool     alt1_available;
 
   uint8_t  num_in_jacks, num_out_jacks; // alt-0 jack descriptor tally, for GTB synthesis
+  uint16_t bcdMSC0, bcdMSC1;             // MIDIStreaming class spec version per alt setting, 0 if not seen
 
   uint8_t  num_gtb;
   midi2_desc_group_terminal_block_t gtb[CFG_TUH_UMP_MAX_GTB];
 
   uint8_t  gtb_fetch_buf[UMPH_GTB_FETCH_BUFSIZE];
+
+  // Raw IN-endpoint transfer buffer. Diagnostic-only for now (see umph_xfer_cb) --
+  // milestone 3/4 replaces this with the real UMP/MIDI1-translation FIFO pump.
+  uint8_t  ep_in_buf[CFG_TUH_UMP_EP_BUFSIZE];
 
   bool     mounted;
 } umph_interface_t;
@@ -266,6 +273,10 @@ static bool umph_parse_midistreaming(umph_interface_t* p_ump, tusb_desc_interfac
     uint8_t const subtype = p_desc[2];
     if      (subtype == MIDI_1_CS_INTERFACE_IN_JACK)  p_ump->num_in_jacks++;
     else if (subtype == MIDI_1_CS_INTERFACE_OUT_JACK) p_ump->num_out_jacks++;
+    else if (subtype == MIDI_1_CS_INTERFACE_HEADER)
+    {
+      p_ump->bcdMSC0 = tu_le16toh(((midi_1_desc_header_t const*) p_desc)->bcdMSC);
+    }
 
     drv_len += tu_desc_len(p_desc);
     p_desc   = tu_desc_next(p_desc);
@@ -296,9 +307,15 @@ static bool umph_parse_midistreaming(umph_interface_t* p_ump, tusb_desc_interfac
       TU_LOG_USBH("UMPH: MIDIStreaming itf_num=%u alt=%u (native UMP) num_ep=%u\r\n",
                  desc_alt1->bInterfaceNumber, desc_alt1->bAlternateSetting, desc_alt1->bNumEndpoints);
 
-      // CS interface descriptors for alt-1 (typically none inline; GTB is fetched via control request)
+      // CS interface descriptors for alt-1 (GTB itself is fetched separately via control
+      // request, but the CS interface header with bcdMSC is typically still present inline)
       while ( drv_len < max_len && TUSB_DESC_CS_INTERFACE == tu_desc_type(p_desc) )
       {
+        if (p_desc[2] == MIDI_1_CS_INTERFACE_HEADER)
+        {
+          p_ump->bcdMSC1 = tu_le16toh(((midi_1_desc_header_t const*) p_desc)->bcdMSC);
+        }
+
         drv_len += tu_desc_len(p_desc);
         p_desc   = tu_desc_next(p_desc);
       }
@@ -457,8 +474,13 @@ static void umph_finish_mount(umph_interface_t* p_ump)
     p_ump->ep_out = desc_ep_out->bEndpointAddress;
   }
 
-  // TODO(milestone 3/4): arm the initial tuh_edpt_xfer() read on ep_in here once the
-  // real data-pump implementation (umph_xfer_cb translation logic) lands.
+  // Arm the initial IN read so umph_xfer_cb() starts seeing incoming MIDI data.
+  // This is a raw diagnostic pump (see umph_xfer_cb) -- real UMP/MIDI1 translation
+  // into the app-facing FIFO API lands with milestone 3/4.
+  if (p_ump->ep_in)
+  {
+    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
+  }
 
   p_ump->mounted = true;
   TU_LOG_USBH("UMPH: daddr=%u itf_num=%u mounted, alt=%u ep_in=0x%02x ep_out=0x%02x gtb_count=%u\r\n",
@@ -568,23 +590,32 @@ bool umph_set_config(uint8_t dev_addr, uint8_t itf_num)
 }
 
 //--------------------------------------------------------------------+
-// TRANSFER CALLBACK (data pump -- logging stub, see milestones 3/4)
+// TRANSFER CALLBACK (raw diagnostic pump -- see milestones 3/4 for the
+// real UMP/MIDI1 translation into the app-facing FIFO read/write API)
 //--------------------------------------------------------------------+
 
 bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
 {
-  (void) result;
-
   umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
   TU_VERIFY(p_ump);
 
-  TU_LOG_USBH("UMPH: xfer_cb daddr=%u ep=0x%02x bytes=%lu\r\n", dev_addr, ep_addr, (unsigned long) xferred_bytes);
+  TU_LOG_USBH("UMPH: xfer_cb daddr=%u ep=0x%02x result=%d bytes=%lu\r\n",
+             dev_addr, ep_addr, result, (unsigned long) xferred_bytes);
 
-  // TODO(milestone 3): alt-1 native UMP raw pump -- apply UMP_WIRE_BSWAP32 at this boundary only.
-  // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing ump_device.cpp's
-  //                     tud_USBMIDI1ToUMP()/write-path logic adapted for the host role.
+  if (ep_addr == p_ump->ep_in)
+  {
+    if (result == XFER_RESULT_SUCCESS && xferred_bytes > 0)
+    {
+      // TODO(milestone 3): alt-1 native UMP raw pump -- apply UMP_WIRE_BSWAP32 at this boundary only.
+      // TODO(milestone 4): alt-0 MIDI1<->UMP translation pump, reusing ump_device.cpp's
+      //                     tud_USBMIDI1ToUMP()/write-path logic adapted for the host role.
+      if (tuh_ump_raw_rx_cb) tuh_ump_raw_rx_cb(dev_addr, p_ump->itf_num, p_ump->ep_in_buf, (uint16_t) xferred_bytes);
+      if (tuh_ump_rx_cb) tuh_ump_rx_cb(dev_addr, p_ump->itf_num);
+    }
 
-  if (tuh_ump_rx_cb && ep_addr == p_ump->ep_in) tuh_ump_rx_cb(dev_addr, p_ump->itf_num);
+    // re-arm the next read regardless of result (a stall/error just means try again)
+    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
+  }
 
   return true;
 }
@@ -631,6 +662,13 @@ uint8_t tuh_ump_alt_setting(uint8_t daddr, uint8_t itf_num)
 {
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
   return p_ump ? p_ump->alt_setting : 0;
+}
+
+uint16_t tuh_ump_get_bcd_msc(uint8_t daddr, uint8_t itf_num)
+{
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  if (!p_ump) return 0;
+  return (p_ump->alt_setting == 1) ? p_ump->bcdMSC1 : p_ump->bcdMSC0;
 }
 
 uint8_t tuh_ump_get_group_terminal_blocks(uint8_t daddr, uint8_t itf_num,
