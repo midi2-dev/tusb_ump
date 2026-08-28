@@ -115,6 +115,10 @@ typedef struct
   bool     alt1_available;
 
   uint8_t  num_in_jacks, num_out_jacks; // alt-0 jack descriptor tally, for GTB synthesis
+  uint8_t  max_emb_jacks_per_ep;         // alt-0: largest bNumEmbMIDIJack seen on either endpoint's
+                                          // CS_ENDPOINT descriptor -- the real cable/group count for
+                                          // devices multiplexing more than one embedded jack pair onto
+                                          // a single endpoint pair (see umph_synthesize_gtb_from_jacks())
   uint16_t bcdMSC0, bcdMSC1;             // MIDIStreaming class spec version per alt setting, 0 if not seen
 
   // Alt-setting-0 (legacy MIDI1) <-> UMP translation state, per virtual cable/group
@@ -254,6 +258,14 @@ static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
   p_ump->num_gtb = 0;
   if ( (p_ump->num_in_jacks == 0 && p_ump->num_out_jacks == 0) || CFG_TUH_UMP_MAX_GTB == 0 ) return;
 
+  // Number of real cables/groups multiplexed onto this endpoint pair: at least 1, and at least
+  // as many as the largest bNumEmbMIDIJack seen on either endpoint's CS_ENDPOINT descriptor (a
+  // device can carry more than one embedded MIDI1 jack pair over a single bulk endpoint pair via
+  // USB-MIDI 1.0 Cable Number -- e.g. a controller with two independent physical DIN ports).
+  uint8_t num_groups = p_ump->max_emb_jacks_per_ep;
+  if (num_groups == 0) num_groups = 1;
+  if (num_groups > UMPH_MAX_NUM_GROUPS_CABLES) num_groups = UMPH_MAX_NUM_GROUPS_CABLES;
+
   midi2_desc_group_terminal_block_t* blk = &p_ump->gtb[0];
   tu_memclr(blk, sizeof(*blk));
   blk->bLength            = sizeof(midi2_desc_group_terminal_block_t);
@@ -263,15 +275,15 @@ static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
   blk->bGrpTrmBlkType     = 0x00; // bidirectional (best-effort default; a legacy MIDI1 device's jack
                                    // graph doesn't map 1:1 onto GTB direction semantics)
   blk->nGroupTrm          = 0;
-  blk->nNumGroupTrm        = 1;
+  blk->nNumGroupTrm        = num_groups;
   blk->iBlockItem         = 0;
   blk->bMIDIProtocol      = 0x01; // USB MIDI 1.0 up to 64 bits
   blk->wMaxInputBandwidth  = 0;   // unknown/not fixed
   blk->wMaxOutputBandwidth = 0;
   p_ump->num_gtb = 1;
 
-  TU_LOG_USBH("UMPH: synthesized 1 Group Terminal Block from %u in / %u out MIDI1 jack(s)\r\n",
-             p_ump->num_in_jacks, p_ump->num_out_jacks);
+  TU_LOG_USBH("UMPH: synthesized 1 Group Terminal Block (numGroups=%u) from %u in / %u out MIDI1 jack(s)\r\n",
+             num_groups, p_ump->num_in_jacks, p_ump->num_out_jacks);
 }
 
 //--------------------------------------------------------------------+
@@ -317,6 +329,16 @@ static void umph_parse_endpoints(umph_interface_t* p_ump, uint8_t alt_setting,
       // trailing class-specific MIDI streaming endpoint descriptor (associates GTB via bAssoGrpTrmBlkID)
       if ( drv_len < max_len && TUSB_DESC_CS_ENDPOINT == tu_desc_type(p_desc) )
       {
+        // Alt-0 (legacy MIDI 1.0) CS_ENDPOINT layout: bLength, bDescriptorType, bDescriptorSubType,
+        // bNumEmbMIDIJack, baAssocJackID[bNumEmbMIDIJack] -- bNumEmbMIDIJack at byte offset 3 is the
+        // real cable/group count multiplexed onto this endpoint (a device can embed more than one
+        // MIDI1 jack pair on a single bulk endpoint pair via USB-MIDI 1.0 Cable Number).
+        if (alt_setting == 0 && tu_desc_len(p_desc) >= 4)
+        {
+          uint8_t const num_emb_jack = p_desc[3];
+          if (num_emb_jack > p_ump->max_emb_jacks_per_ep) p_ump->max_emb_jacks_per_ep = num_emb_jack;
+        }
+
         drv_len += tu_desc_len(p_desc);
         p_desc   = tu_desc_next(p_desc);
       }
