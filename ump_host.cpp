@@ -144,20 +144,17 @@ static umph_interface_t _umph_itf[CFG_TUH_UMP];
 // INSTANCE POOL HELPERS
 //--------------------------------------------------------------------+
 
-static umph_interface_t* find_itf_by_daddr(uint8_t daddr)
+// A composite device can expose more than one AudioControl interface (e.g.
+// a real audio-streaming function alongside an unrelated MIDI function, as
+// on the iRig Keys 2 PRO -- 5 interfaces: AC(audio)+AS+HID+AC(midi)+MS).
+// Always allocate a *fresh* slot for a newly-seen AC interface rather than
+// reusing whatever slot already exists for this daddr -- otherwise a second,
+// unrelated AC interface silently clobbers the first one's itf_num_ac,
+// orphaning it (find_itf() can no longer find it), which stalls TinyUSB's
+// enumeration state machine forever waiting on a set_config completion that
+// never comes.
+static umph_interface_t* alloc_new_itf(uint8_t daddr)
 {
-  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
-  {
-    if (_umph_itf[i].daddr == daddr) return &_umph_itf[i];
-  }
-  return NULL;
-}
-
-static umph_interface_t* find_or_alloc_itf(uint8_t daddr)
-{
-  umph_interface_t* p_ump = find_itf_by_daddr(daddr);
-  if (p_ump) return p_ump;
-
   for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
   {
     if (_umph_itf[i].daddr == 0)
@@ -172,10 +169,48 @@ static umph_interface_t* find_or_alloc_itf(uint8_t daddr)
   return NULL;
 }
 
+// Unmerged-shape enumeration (separate open() calls for the AC and MS
+// interfaces) needs to pair a just-seen MIDIStreaming interface with the
+// *correct* previously-opened, still-unpaired AudioControl interface when a
+// device has more than one candidate AC slot pending. USB interface
+// numbering convention places an MS interface immediately after its
+// associated AC interface, so match on itf_num_ac + 1 == ms_itf_num rather
+// than just "any pending AC slot for this daddr".
+static umph_interface_t* find_pending_ac_itf(uint8_t daddr, uint8_t ms_itf_num)
+{
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && p->itf_num == 0xFF && p->itf_num_ac != 0xFF &&
+        (uint8_t) (p->itf_num_ac + 1) == ms_itf_num)
+      return p;
+  }
+  return NULL;
+}
+
+// A device may have multiple slots (one per AC/MS interface grouping) --
+// search all of them rather than assuming the first daddr match is the
+// right one.
 static umph_interface_t* find_itf(uint8_t daddr, uint8_t itf_num)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(daddr);
-  if (p_ump && (p_ump->itf_num == itf_num || p_ump->itf_num_ac == itf_num)) return p_ump;
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && (p->itf_num == itf_num || p->itf_num_ac == itf_num)) return p;
+  }
+  return NULL;
+}
+
+// Same rationale as find_itf() -- a device's dangling (unpaired) AC-only
+// slot has ep_in == ep_out == 0, so a first-daddr-match lookup could return
+// the wrong slot and silently drop the mounted interface's traffic.
+static umph_interface_t* find_itf_by_ep(uint8_t daddr, uint8_t ep_addr)
+{
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && (p->ep_in == ep_addr || p->ep_out == ep_addr)) return p;
+  }
   return NULL;
 }
 
@@ -404,7 +439,7 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
       p_desc   = tu_desc_next(p_desc);
     }
 
-    umph_interface_t* p_ump = find_or_alloc_itf(dev_addr);
+    umph_interface_t* p_ump = alloc_new_itf(dev_addr);
     TU_ASSERT(p_ump);
     p_ump->itf_num_ac = itf_desc->bInterfaceNumber;
 
@@ -425,7 +460,8 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
 
   if ( AUDIO_SUBCLASS_MIDI_STREAMING == itf_desc->bInterfaceSubClass )
   {
-    umph_interface_t* p_ump = find_or_alloc_itf(dev_addr);
+    umph_interface_t* p_ump = find_pending_ac_itf(dev_addr, itf_desc->bInterfaceNumber);
+    if (!p_ump) p_ump = alloc_new_itf(dev_addr);
     TU_ASSERT(p_ump);
 
     uint16_t drv_len = tu_desc_len(itf_desc);
@@ -686,7 +722,7 @@ bool umph_set_config(uint8_t dev_addr, uint8_t itf_num)
 
 bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
+  umph_interface_t* p_ump = find_itf_by_ep(dev_addr, ep_addr);
   TU_VERIFY(p_ump);
 
   TU_LOG_USBH("UMPH: xfer_cb daddr=%u ep=0x%02x result=%d bytes=%lu\r\n",
@@ -732,15 +768,20 @@ bool umph_deinit(void)
 
 void umph_close(uint8_t dev_addr)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
-  if (!p_ump) return;
+  // A device may hold more than one slot (one per AC/MS interface grouping)
+  // -- clear all of them, not just the first match.
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p_ump = &_umph_itf[i];
+    if (p_ump->daddr != dev_addr) continue;
 
-  uint8_t const itf_num = p_ump->itf_num;
-  bool const was_mounted = p_ump->mounted;
+    uint8_t const itf_num = p_ump->itf_num;
+    bool const was_mounted = p_ump->mounted;
 
-  tu_memclr(p_ump, sizeof(*p_ump));
+    tu_memclr(p_ump, sizeof(*p_ump));
 
-  if (was_mounted && tuh_ump_umount_cb) tuh_ump_umount_cb(dev_addr, itf_num);
+    if (was_mounted && tuh_ump_umount_cb) tuh_ump_umount_cb(dev_addr, itf_num);
+  }
 }
 
 //--------------------------------------------------------------------+
