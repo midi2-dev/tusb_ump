@@ -2,7 +2,7 @@
  * The MIT License (MIT)
  *
  * Copyright (c) 2019 Ha Thach (tinyusb.org)
- * Copyright (c) 2022 Michael Loh (AmeNote.com)
+ * Copyright (c) 2023-2026 Michael Loh (AmeNote.com)
  *
  * NOTE: Code adjustments made to support USB MIDI 2.0 UMP Packet format as
  * Alternate Interface 1. See USB Device Class Definition for MIDI Devices,
@@ -1200,7 +1200,7 @@ Routine Description:
 
 Copyright 2023 Association of Musical Electronics Industry
 Copyright 2023 Microsoft
-Driver source code developed by AmeNote. Some components Copyright 2023 AmeNote Inc.
+Driver source code developed by AmeNote. Some components Copyright 2023-2026 AmeNote Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

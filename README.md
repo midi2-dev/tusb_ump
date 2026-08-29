@@ -44,7 +44,7 @@ The tusb_ump for tinyUSB driver was developed in compliance to the standards pro
 
 ## MIT License
 
-Copyright (c) 2023 MIDI2.dev
+Copyright (c) 2023-2026 MIDI2.dev
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -82,4 +82,4 @@ We invite for collaborative and constructive contributions. You can contribute b
 TODO: Contribution agreement.
 
 ##### AmeNote, AmeNote Logo and ProtoZOA are trademarks of AmeNote Inc.
-##### Copyright (c) MIDI2.dev, 2023.
+##### Copyright (c) MIDI2.dev, 2023-2026.
