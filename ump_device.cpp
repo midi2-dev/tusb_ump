@@ -360,13 +360,18 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
       // Mirror tud_USBMIDI1ToUMP()'s reassignment of a real-time System
       // message (CIN 15, data byte's high bit set) to CIN 5 (SYSEX_END_1BYTE)
       // so the word-count estimate here matches what conversion will do.
+      // That reassigned case converts to a single 1-word UMP System message,
+      // not the 2-word SysEx7 completion a literal CIN 5 produces, so it's
+      // excluded from needsTwoWords below.
       uint8_t code_index = peekBuf[0] & 0x0f;
+      bool isReassignedRealtime = false;
       if (code_index == MIDI_1_CIN_1BYTE_DATA && (peekBuf[1] & 0x80))
       {
         code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
+        isReassignedRealtime = true;
       }
       bool needsTwoWords = (code_index == MIDI_1_CIN_SYSEX_START)
-                         || (code_index == MIDI_1_CIN_SYSEX_END_1BYTE)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_1BYTE && !isReassignedRealtime)
                          || (code_index == MIDI_1_CIN_SYSEX_END_2BYTE)
                          || (code_index == MIDI_1_CIN_SYSEX_END_3BYTE);
       if (needsTwoWords && (numAvail - numRead) < 2)
@@ -1274,11 +1279,15 @@ tud_USBMIDI1ToUMP(
         if ( (pBuffer[1] & 0x80) // most significant bit set and not sysex ending
             && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
         {
+            // A single-byte System message is one 32-bit UMP word (MT=1),
+            // not a 64-bit SysEx7 packet -- fill and pad it directly rather
+            // than falling into the 2-word SysEx completion path below.
             umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
             umpPkt->umpData.umpBytes[1] = pBuffer[1];
-            firstByte = 1;
-            lastByte = 1;
-            goto COMPLETE_1BYTE;
+            umpPkt->umpData.umpBytes[2] = 0x00;
+            umpPkt->umpData.umpBytes[3] = 0x00;
+            umpPkt->wordCount = 1;
+            break;
         }
 
         umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
@@ -1298,7 +1307,6 @@ tud_USBMIDI1ToUMP(
             return false;
         }
 
-COMPLETE_1BYTE:
         umpPkt->wordCount = 2;
         // Transfer in bytes
         copyPos = firstByte;

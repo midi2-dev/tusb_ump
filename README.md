@@ -72,7 +72,7 @@ flowchart TD
     F --> H["MT=3 Data64, wordCount=2"]
     G --> H
     D -->|"0x5: SysEx end-1-byte or<br/>single-byte System Common"| I{"byte1 high bit set<br/>and != F7?"}
-    I -->|yes| J["MT=1 System, wordCount=2<br/>(2nd word unused)"]
+    I -->|yes| J["MT=1 System, wordCount=1"]
     I -->|"no, in SysEx, byte1==F7"| K["status=END, clear in-SysEx<br/>MT=3, wordCount=2"]
     I -->|"no, not in SysEx"| L[reject: malformed]
     D -->|"0x6: SysEx end-2-byte"| M["status=END or COMPLETE<br/>MT=3, wordCount=2"]
