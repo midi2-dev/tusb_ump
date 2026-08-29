@@ -9,9 +9,27 @@
  * Alternate Interface 1. See USB Device Class Definition for MIDI Devices,
  * Version 2.0 - May 2, 2020.
  *
- * UMP Driver Version 0.2 - July 13, 2022
+ * UMP Driver Version 0.1 - June 28, 2022
  * UMP Driver Version 0.2 - Dec. 13, 2022
  *  - Splitting UMP Driver base from tud_midi
+ * UMP Driver Version 0.3 - June 10, 2023
+ *  - fixes issue with virtual cable ID and group IDs translation between
+ *    USB MIDI 1.0 and USB MIDI 2.0
+ * UMP Driver Version 0.4 - Sept. 4, 2023
+ * - further fixes for multiple virtual cables when translating between
+ *   USB MIDI 1.0 and USB MIDI 2.0. Remove dependance on external libraries.
+ * UMP Driver Version 0.5 - Sept. 18, 2023
+ * - bug fixes, USB MIDI 1.0 SYSEX on USB IN and USB OUT.
+ * UMP Driver Version 1.0 - Sept. 26, 2024
+ * - handling of USB MIDI 1.0 SYSEX translation
+ * - Update of driver to latest tinyUSB implementation requirements
+ *
+ * The driver is backwards compatible with USB MIDI 1.0 if connected to an
+ * operating system or other USB Hosting that does not support USB MIDI 2.0.
+ * The driver does not currently support CIN 0xF, Single Byte as no known
+ * operating system hosting is expected to send to device as CIN 0xf. If
+ * CIN of 0xf is required, the implementer is welcome to contribute this
+ * added processing.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
