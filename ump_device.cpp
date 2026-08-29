@@ -348,7 +348,6 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
-  uint16_t numProcessed = 0;
 
   static UMP_PACKET umpPacket;
 
@@ -357,8 +356,12 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
   // Determine if MIDI 1
   if (!ump->ump_interface_selected)
   {
-    // Always look for enough space to process in a SYSEX message
-    while ((numAvail - numProcessed) >= 2)
+    // Always look for enough space to process in a SYSEX message. Each raw
+    // USB-MIDI1 word can convert to up to 2 UMP words (a 64-bit SYSEX7
+    // packet), so bound the loop against remaining output space
+    // (numAvail - numRead) rather than remaining input words, to avoid
+    // overflowing the caller's buffer.
+    while ((numAvail - numRead) >= 2)
     {
       // Get next word from USB
       uint32_t readWord;
@@ -366,7 +369,6 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
       {
         goto END_READ;
       }
-      numProcessed++;
       //readWord = RtlUlongByteSwap(readWord);
 
       if (readWord)
