@@ -7,6 +7,8 @@
 //      2-word SysEx completion must not short-change a request when the
 //      next message is actually a 1-word Channel Voice/System Common.
 //   3. Byte continuity across multiple reads mid-SysEx
+//   4. A single-byte System Common/real-time message (e.g. Timing Clock)
+//      converts to exactly 1 UMP word, not 2 with a spurious zero word.
 //
 // No test framework -- plain assert(), built as a small host executable
 // (see Makefile). Uses UMP_DEVICE_UNIT_TEST-guarded hooks in ump_device.cpp
@@ -25,6 +27,9 @@
 #define CIN_SYSEX_START   0x4
 #define CIN_SYSEX_END_3B  0x7
 #define CIN_NOTE_ON       0x9
+#define CIN_1BYTE_DATA    0xF
+
+#define MIDI1_TIMING_CLOCK 0xF8
 
 static void push_word(uint8_t cin, uint8_t cable, uint8_t b1, uint8_t b2, uint8_t b3)
 {
@@ -142,11 +147,38 @@ static void test_split_call_continuity(void)
     printf("PASS: test_split_call_continuity\n");
 }
 
+static void test_system_realtime_single_word(void)
+{
+    reset_interface();
+
+    // A single-byte System Common/real-time status (CIN 0xF, data byte's
+    // high bit set) is reassigned internally to CIN 0x5, which is shared
+    // with the genuine 2-word SysEx-end-1-byte completion -- it must still
+    // convert to exactly 1 UMP word (MT=1 System), not 2 with a spurious
+    // trailing zero word.
+    push_word(CIN_1BYTE_DATA, 0, MIDI1_TIMING_CLOCK, 0x00, 0x00);
+    push_word(CIN_NOTE_ON, 0, 0x90, 60, 100);
+
+    uint32_t buf[2];
+    uint16_t n = tud_ump_read_ntoh(ITF, buf, 2);
+    assert(n == 2); // 1 word each, not 2 (clock + spurious zero) leaving the
+                     // Note On stranded in the FIFO for another call
+
+    uint32_t expected_clock_word = ((uint32_t)UMP_MT_SYSTEM << 24) | ((uint32_t)MIDI1_TIMING_CLOCK << 16);
+    uint32_t expected_note_on_word = ((uint32_t)UMP_MT_MIDI1_CV << 24) | (0x90u << 16) | (60u << 8) | 100u;
+    assert(buf[0] == expected_clock_word);
+    assert(buf[1] == expected_note_on_word); // fails if a spurious 2nd word
+                                              // pushed the real Note On out
+
+    printf("PASS: test_system_realtime_single_word (n=%u)\n", n);
+}
+
 int main(void)
 {
     test_no_overflow_on_dense_sysex();
     test_no_unnecessary_stall_on_cv_messages();
     test_split_call_continuity();
+    test_system_realtime_single_word();
     printf("All tests passed.\n");
     return 0;
 }
