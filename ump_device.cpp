@@ -1463,5 +1463,17 @@ COMPLETE_1BYTE:
     return true;
 }
 
+#ifdef UMP_DEVICE_UNIT_TEST
+void tud_ump_test_set_ep_out(uint8_t itf, uint8_t ep_out)
+{
+    _umpd_itf[itf].ep_out = ep_out;
+}
+
+uint16_t tud_ump_test_rx_write(uint8_t itf, const uint8_t* data, uint16_t n)
+{
+    return tu_fifo_write_n(&_umpd_itf[itf].rx_ff, data, n);
+}
+#endif
+
 } // extern "C"
 #endif

@@ -115,6 +115,18 @@ void     umpd_reset           (uint8_t rhport);
 uint16_t umpd_open            (uint8_t rhport, tusb_desc_interface_t const * itf_desc, uint16_t max_len);
 bool     umpd_control_xfer_cb (uint8_t rhport, uint8_t stage, tusb_control_request_t const * request);
 bool     umpd_xfer_cb         (uint8_t rhport, uint8_t edpt_addr, xfer_result_t result, uint32_t xferred_bytes);
+
+#ifdef UMP_DEVICE_UNIT_TEST
+//--------------------------------------------------------------------+
+// Test-only hooks (test/host/) -- not part of the public driver API.
+// Let host-side unit tests drive an interface without a real USB
+// enumeration: mark it "open" (ep_out set) and inject raw bytes as if
+// received from the USB OUT endpoint.
+//--------------------------------------------------------------------+
+void     tud_ump_test_set_ep_out (uint8_t itf, uint8_t ep_out);
+uint16_t tud_ump_test_rx_write   (uint8_t itf, const uint8_t* data, uint16_t n);
+#endif
+
 #ifdef __cplusplus
  }
 #endif
