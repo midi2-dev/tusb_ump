@@ -333,8 +333,10 @@ uint8_t tud_alt_setting( uint8_t itf) {
  * @param itf       interface number
  * @param pkts      Array of 32 bit formatted UMP packet data.
  * @param numAvail  Number of 32 bit UMP words that are available in handle
- *                  to populate. Note to accomodate possible SYSEX, needs to be at least 2
- *                  for 64bit size UMP Packet.
+ *                  to populate. A pending SYSEX-producing word (64-bit UMP
+ *                  packet) is only converted once 2 words of space remain;
+ *                  it is otherwise deferred to the next call rather than
+ *                  overflowing the buffer.
  * @param hostOrder If true, each returned word is the host-native uint32_t
  *                  whose arithmetic value matches the UMP wire word (bits
  *                  31:28 = message type, etc, per the MIDI 2.0 UMP spec) --
@@ -348,7 +350,6 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
-  uint16_t numProcessed = 0;
 
   static UMP_PACKET umpPacket;
 
@@ -357,16 +358,43 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
   // Determine if MIDI 1
   if (!ump->ump_interface_selected)
   {
-    // Always look for enough space to process in a SYSEX message
-    while ((numAvail - numProcessed) >= 2)
+    // Loop while there's at least 1 free output slot. A raw USB-MIDI1 word
+    // converts to either 1 UMP word (Channel Voice, System Common) or 2 (a
+    // 64-bit SYSEX7 packet), so peek the next word's CIN first and only
+    // require 2 free slots when it's SYSEX-producing -- this bounds output
+    // against numAvail without needlessly stalling on 1-word messages when
+    // only 1 slot remains.
+    while ((numAvail - numRead) >= 1)
     {
+      uint8_t peekBuf[2];
+      if (tu_fifo_peek_n(&ump->rx_ff, peekBuf, sizeof(peekBuf)) != sizeof(peekBuf))
+      {
+        goto END_READ;
+      }
+
+      // Mirror tud_USBMIDI1ToUMP()'s reassignment of a real-time System
+      // message (CIN 15, data byte's high bit set) to CIN 5 (SYSEX_END_1BYTE)
+      // so the word-count estimate here matches what conversion will do.
+      uint8_t code_index = peekBuf[0] & 0x0f;
+      if (code_index == MIDI_1_CIN_1BYTE_DATA && (peekBuf[1] & 0x80))
+      {
+        code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
+      }
+      bool needsTwoWords = (code_index == MIDI_1_CIN_SYSEX_START)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_1BYTE)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_2BYTE)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_3BYTE);
+      if (needsTwoWords && (numAvail - numRead) < 2)
+      {
+        break;
+      }
+
       // Get next word from USB
       uint32_t readWord;
       if (tu_fifo_read_n(&ump->rx_ff, (void *)&readWord, sizeof(uint32_t)) != sizeof(uint32_t) )
       {
         goto END_READ;
       }
-      numProcessed++;
       //readWord = RtlUlongByteSwap(readWord);
 
       if (readWord)
