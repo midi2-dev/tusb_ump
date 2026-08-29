@@ -1,7 +1,11 @@
 // Host-side regression tests for tud_ump_read_impl()'s alt-0 (legacy
 // USB-MIDI1 byte stream) read path in ump_device.cpp, covering:
-//   1. No buffer overflow (issue #15 / PR #17)
-//   2. No unnecessary 1-word stalling (issue #18 / PR #19)
+//   1. No buffer overflow: a raw word can convert to up to 2 UMP words
+//      (a SysEx7 completion), so output must always be bounded by the
+//      caller's requested count, not by raw input words consumed.
+//   2. No unnecessary 1-word stalling: reserving room for a possible
+//      2-word SysEx completion must not short-change a request when the
+//      next message is actually a 1-word Channel Voice/System Common.
 //   3. Byte continuity across multiple reads mid-SysEx
 //
 // No test framework -- plain assert(), built as a small host executable
@@ -38,9 +42,9 @@ static void reset_interface(void)
 // A raw USB-MIDI1 word carrying a SysEx7 CIN (start/end variants) converts
 // to 2 UMP words (a 64-bit SYSEX7 packet); mirrors ump_device.cpp's own
 // MIDI_1_CIN_SYSEX_* handling. Encodes "F0 7E 7F 06 01 F7" (a 6-byte
-// Universal Device Inquiry, matching issue #15's original repro) as two
-// USB-MIDI1 packets: CIN 4 (start, carrying F0 + 2 data bytes) then CIN 7
-// (end-3-byte, carrying 2 data bytes + the F7 terminator).
+// Universal Device Inquiry -- a real-world message shape, not a contrived
+// one) as two USB-MIDI1 packets: CIN 4 (start, carrying F0 + 2 data bytes)
+// then CIN 7 (end-3-byte, carrying 2 data bytes + the F7 terminator).
 static void push_sysex_message(void)
 {
     push_word(CIN_SYSEX_START, 0, 0xF0, 0x7E, 0x7F);

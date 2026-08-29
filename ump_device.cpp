@@ -66,18 +66,11 @@
 //--------------------------------------------------------------------+
 // TinyUSB API compatibility
 //
-// The ESP-IDF TinyUSB fork (shipped by arduino-esp32 3.x) is versioned
-// 0.18 (TUSB_VERSION_NUMBER = 1800) but retains the PRE-0.16 upstream
-// signatures:
-//   usbd_edpt_xfer — 4 args, no is_isr
-//   tu_fifo_config — 5 args, with item_size
-//
-// The upstream TinyUSB 0.16 briefly added `is_isr` and removed
-// `item_size`, then 0.17+ reverted `is_isr`. The IDF fork never
-// adopted those transient changes.
-//
-// Detection: sdkconfig.h is always present in ESP-IDF builds and
-// never in standalone TinyUSB — use it to identify the IDF fork.
+// The ESP-IDF TinyUSB fork (arduino-esp32 3.x) reports version 0.18 but
+// keeps pre-0.16 signatures (usbd_edpt_xfer: 4 args, no is_isr;
+// tu_fifo_config: 5 args, with item_size) rather than the 0.17+ upstream
+// ones. sdkconfig.h exists only in ESP-IDF builds, so it's used to detect
+// the fork and pick the matching call shape below.
 //--------------------------------------------------------------------+
 #if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 1600 && \
     TUSB_VERSION_NUMBER < 1700 && !__has_include(<sdkconfig.h>)
@@ -104,31 +97,25 @@
 //--------------------------------------------------------------------+
 // ENDIAN HELPERS
 //--------------------------------------------------------------------+
-// Two distinct byte-order concerns live in this file -- do not conflate them:
+// Two distinct byte orders are in play, don't conflate them:
 //
-// 1. INTERNAL representation (UMP_PACKET.umpData.umpBytes[]): this driver's
-//    own field-extraction code (the alt-setting-0 <-> alt-setting-1 MIDI 1.0
-//    CIN translation switch/case logic) reads/builds messages assuming
-//    umpBytes[0] holds the MT/group byte, matching the UMP spec's logical/
-//    diagram view (most-significant byte first). UMP_HOST_BSWAP32 converts
-//    a host-native arithmetic uint32_t (MT in bits 31:28) into/out of that
-//    internal layout, portably regardless of host endianness.
+// 1. INTERNAL (UMP_PACKET.umpData.umpBytes[]): this driver's own CIN
+//    translation logic builds/reads messages with umpBytes[0] = the MT/group
+//    byte, matching the UMP spec's logical (most-significant-byte-first)
+//    view. UMP_HOST_BSWAP32 converts a host-native arithmetic uint32_t (MT in
+//    bits 31:28) into/out of that layout, portably regardless of host
+//    endianness.
 //
-// 2. WIRE byte order (native alt-setting-1 passthrough, raw bytes read from
-//    or written to the USB endpoint FIFOs): per the USB Device Class
-//    Definition for MIDI Devices v2.0, section 3.2.2 "UMP Messages in a USB
-//    Packet: Byte Ordering" -- "Each 32 bit word of a Universal MIDI Packet
-//    is sent with the least significant byte first" -- confirmed against
-//    real USB captures of a spec-compliant host (byte 0 on the wire is the
-//    word's LSB, byte 3 is the MT/group byte). UMP_WIRE_BSWAP32 converts a
-//    host-native arithmetic uint32_t into/out of that little-endian wire
-//    layout: a no-op on a little-endian host (its native memory layout
-//    already matches), a swap on a big-endian host.
+// 2. WIRE (native alt-setting-1 passthrough, raw endpoint FIFO bytes): per
+//    USB Device Class Definition for MIDI Devices v2.0 section 3.2.2, each
+//    32-bit UMP word is sent least-significant-byte-first on the wire (byte 0
+//    = LSB, byte 3 = MT/group). UMP_WIRE_BSWAP32 converts a host-native
+//    arithmetic uint32_t into/out of that little-endian wire layout -- a
+//    no-op on a little-endian host, a swap on a big-endian one.
 //
-// tud_ump_read()/tud_ump_write() intentionally preserve this driver's
-// existing raw behavior -- no conversion -- for applications already
-// built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton() for
-// portable, spec-correct behavior in new code.
+// tud_ump_read()/tud_ump_write() keep this driver's original raw behavior
+// (no conversion) for existing callers. Use tud_ump_read_ntoh()/
+// tud_ump_write_hton() for portable, spec-correct behavior in new code.
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
   #define UMP_HOST_BSWAP32(x) (x)
   #define UMP_WIRE_BSWAP32(x) __builtin_bswap32(x)
@@ -351,8 +338,6 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
 
-  static UMP_PACKET umpPacket;
-
   TU_VERIFY(ump->ep_out);
 
   // Determine if MIDI 1
@@ -529,7 +514,6 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
   TU_VERIFY(ump->ep_out);
 
   uint16_t    numProcessed = 0;
-  uint8_t     *pBuffer = (uint8_t *)words;
   bool        bEnterSysex;
   bool        bEndSysex;
   uint8_t     numberBytes;
@@ -660,6 +644,13 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
           }
           break;
 
+        // A UMP SysEx7 (64-bit data) packet carries up to 6 payload bytes, but a
+        // USB-MIDI1 SysEx report is 4 bytes carrying at most 3 payload bytes, and
+        // the two packet boundaries don't line up. sysexBS is a per-cable ring
+        // buffer that decouples "bytes queued from this UMP packet" from "bytes
+        // emittable in the next 4-byte report": bytes are pushed in below in
+        // whatever count the UMP packet delivers, then drained 1-3 at a time
+        // into successive USB-MIDI1 reports until empty.
         case UMP_MT_DATA_64:
           bEnterSysex = false;
           bEndSysex = false;
@@ -1003,20 +994,14 @@ uint16_t umpd_open(uint8_t rhport, tusb_desc_interface_t const * desc_itf, uint1
   }
 
   // See if there is an alternate interface for UMP USB MIDI 2.0 (bAlternateSetting 1,
-  // same bInterfaceNumber) immediately following. Previously this collapsed to
-  // `drv_len = max_len` -- "nothing more to parse in the whole config descriptor" --
-  // which only held when this was the sole USB MIDI Function (CFG_TUD_UMP == 1). With
-  // a second Function's IAD/interfaces following in the same config descriptor, that
-  // shortcut silently swallowed them: TinyUSB's core driver-dispatch loop believed
-  // umpd_open() had consumed everything and never called it again for instance 1+,
-  // so the second Function's endpoints were never opened and its itf_num never
-  // registered -- any SET_INTERFACE/GTB request addressed to it then failed
-  // TU_VERIFY(ump) in umpd_control_xfer_cb and STALLed (macOS logs "Unable to set
-  // MIDI 2.0 alt setting!" for that interface). Walk the alt setting's own
-  // descriptor block instead, same pattern as Alternate Setting 0 above, so drv_len
-  // correctly reflects only what this interface consumes. Its endpoint descriptors
-  // reuse Alt 0's addresses (USB MIDI 2.0 Alt-Setting model), so we measure their
-  // length without calling usbd_edpt_open() again.
+  // same bInterfaceNumber) immediately following. A config descriptor can hold more
+  // than one USB Function (e.g. this one plus an unrelated CDC/vendor Function), so
+  // drv_len must reflect only what this interface's own descriptor block consumes --
+  // walk it explicitly (same pattern as Alternate Setting 0 above) rather than
+  // assuming nothing else follows, or TinyUSB's driver-dispatch loop will believe
+  // umpd_open() consumed the whole descriptor and skip any Function after this one.
+  // The alt setting's endpoint descriptors reuse Alt 0's addresses (USB MIDI 2.0
+  // Alt-Setting model), so measure their length without calling usbd_edpt_open() again.
   while ( TUSB_DESC_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
   {
     tusb_desc_interface_t const * desc_alt = (tusb_desc_interface_t const *) p_desc;
@@ -1071,14 +1056,11 @@ bool umpd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t 
   if (stage != CONTROL_STAGE_SETUP) return true;
 
   // Interface-addressed requests (SET_INTERFACE, GTB GET_DESCRIPTOR) carry the
-  // target interface number in wIndex -- resolve the matching UMP instance by
-  // itf_num, same pattern umpd_xfer_cb() already uses (matched by endpoint
-  // address there instead). Previously this indexed _umpd_itf[rhport], which
-  // is the USB controller/root-hub-port index, not an interface instance --
-  // always resolved to instance 0 regardless of which interface the host
-  // actually addressed. Harmless when CFG_TUD_UMP==1 (single instance, its
-  // itf_num always matches), but silently misrouted every SET_INTERFACE/GTB
-  // request for instance 1+ when CFG_TUD_UMP>1.
+  // target interface number in wIndex, not the controller/root-hub-port index --
+  // resolve the matching UMP instance by itf_num, same pattern umpd_xfer_cb()
+  // already uses (matched by endpoint address there instead). This only matters
+  // once CFG_TUD_UMP > 1: with a single instance any indexing scheme happens to
+  // resolve to it.
   uint8_t itf_num = tu_u16_low(request->wIndex);
   umpd_interface_t* ump = NULL;
   for (uint8_t i = 0; i < CFG_TUD_UMP; i++)
@@ -1180,63 +1162,29 @@ bool umpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
   return true;
 }
 
+/**
+ * Convert one USB-MIDI1 32-bit word packet to a UMP packet. Populates only
+ * UMP message types 1 (System), 2 (MIDI 1.0 Channel Voice), and 3 (64-bit
+ * data / SysEx7); callers needing MIDI 2.0 Channel Voice must convert
+ * separately.
+ *
+ * Refined from the USB MIDI 2.0 Host Driver contributed to Windows by the
+ * Association of Musical Electronics Industry and Microsoft; driver source
+ * further developed by AmeNote.
+ *
+ * @param usbMidi1Pkt  The USB MIDI 1.0 packet as a 32-bit word.
+ * @param pbIsInSysex  In/out SysEx state for this USB-MIDI1 data stream;
+ *                     caller owns and persists it across calls, starting false.
+ * @param umpPkt       Output UMP packet. Data beyond wordCount is left
+ *                     unwritten -- callers must not read past wordCount.
+ * @return bool        true if umpPkt was populated, false otherwise.
+ */
 bool
 tud_USBMIDI1ToUMP(
     uint32_t        usbMidi1Pkt,
     bool*           pbIsInSysex,
     PUMP_PACKET     umpPkt
 )
-/*++
-Routine Description:
-
-    Helper routine to handle conversion of USB MIDI 1.0 32 bit word packet
-    to UMP formatted packet. The routine will only populate UMP message
-    types 1: System, 2: MIDI 1.0 Channel Voice, and 3: 64 bit data (SYSEX)
-    messages. It is rsponsibility of other routines to convert between
-    MIDI 2.0 Channel voice if needed.
-
-  NOTE: This routine was refined from the USB MIDI 2.0 Host Driver developed as open
-  source to be included in Windows by the Association of Musical Electronics Industry.
-
-Copyright 2023 Association of Musical Electronics Industry
-Copyright 2023 Microsoft
-Driver source code developed by AmeNote. Some components Copyright 2023-2026 AmeNote Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Arguments:
-
-    usbMidi1Pkt:    The USB MIDI 1.0 packet presented as a 32 bit word
-    pbIsInSysex:    Reference to boolean variable where to store if processing
-                    a SYSEX message or not. Note that calling funciton is
-                    responsible to maintain this state for each USB MIDI 1.0
-                    data stream to process. The intial value should be false.
-    umpPkt:         Reference to data location to create UMP packet into. Note
-                    that for optimizations, the data beyond wordCount is not
-                    cleared, therefore calling function should not process beyond
-                    wordCount or zero any additional dataspace.
-
-Return Value:
-
-    bool:           Indicates true of umpPkt is ready, false otherwise.
-
---*/
 {
     // Checked passed parameters
     if (!usbMidi1Pkt || !pbIsInSysex || !umpPkt)

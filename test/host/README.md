@@ -1,11 +1,11 @@
 # Host-side unit tests
 
 Regression tests for `tud_ump_read_impl()`'s alt-0 (legacy USB-MIDI1 byte
-stream) read path, covering issues [#15](https://github.com/midi2-dev/tusb_ump/issues/15)
-and [#18](https://github.com/midi2-dev/tusb_ump/issues/18):
+stream) read path:
 
-1. **No buffer overflow** -- a dense stream of SysEx7 messages never yields
-   more UMP words than requested, regardless of how many raw USB-MIDI1
+1. **No buffer overflow** -- a raw USB-MIDI1 word can convert to up to 2 UMP
+   words (a SysEx7 completion), so a dense stream of SysEx7 messages must
+   never yield more UMP words than requested, regardless of how many raw
    words each one takes to complete.
 2. **No unnecessary stalling** -- a stream of 1-word messages (Channel
    Voice, System Common) fully drains a request rather than stopping 1
