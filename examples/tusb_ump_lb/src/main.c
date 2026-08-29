@@ -62,15 +62,7 @@ int main(void)
         // time, echoing each straight back out.
         while (tud_ump_n_mounted(0) && tud_ump_n_available(0))
         {
-            // NOTE: buffer is oversized relative to the 4-word request below.
-            // On the legacy MIDI 1.0 byte stream alt setting (0),
-            // tud_ump_read_ntoh() can currently write up to ~2x the numAvail
-            // it's asked for when converting SysEx7 (known upstream
-            // ump_device.cpp bug: it bounds raw USB words consumed, not
-            // converted UMP words written). Requesting 4 but sizing the
-            // buffer for 8 absorbs that overrun without corrupting the
-            // stack; it does not fix the underlying bug.
-            uint32_t words[8];
+            uint32_t words[4];
             uint16_t count = tud_ump_read_ntoh(0, words, 4);
 
             if (count == 0)
