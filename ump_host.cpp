@@ -115,6 +115,10 @@ typedef struct
   bool     alt1_available;
 
   uint8_t  num_in_jacks, num_out_jacks; // alt-0 jack descriptor tally, for GTB synthesis
+  uint8_t  max_emb_jacks_per_ep;         // alt-0: largest bNumEmbMIDIJack seen on either endpoint's
+                                          // CS_ENDPOINT descriptor -- the real cable/group count for
+                                          // devices multiplexing more than one embedded jack pair onto
+                                          // a single endpoint pair (see umph_synthesize_gtb_from_jacks())
   uint16_t bcdMSC0, bcdMSC1;             // MIDIStreaming class spec version per alt setting, 0 if not seen
 
   // Alt-setting-0 (legacy MIDI1) <-> UMP translation state, per virtual cable/group
@@ -144,20 +148,17 @@ static umph_interface_t _umph_itf[CFG_TUH_UMP];
 // INSTANCE POOL HELPERS
 //--------------------------------------------------------------------+
 
-static umph_interface_t* find_itf_by_daddr(uint8_t daddr)
+// A composite device can expose more than one AudioControl interface (e.g.
+// a real audio-streaming function alongside an unrelated MIDI function, as
+// on the iRig Keys 2 PRO -- 5 interfaces: AC(audio)+AS+HID+AC(midi)+MS).
+// Always allocate a *fresh* slot for a newly-seen AC interface rather than
+// reusing whatever slot already exists for this daddr -- otherwise a second,
+// unrelated AC interface silently clobbers the first one's itf_num_ac,
+// orphaning it (find_itf() can no longer find it), which stalls TinyUSB's
+// enumeration state machine forever waiting on a set_config completion that
+// never comes.
+static umph_interface_t* alloc_new_itf(uint8_t daddr)
 {
-  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
-  {
-    if (_umph_itf[i].daddr == daddr) return &_umph_itf[i];
-  }
-  return NULL;
-}
-
-static umph_interface_t* find_or_alloc_itf(uint8_t daddr)
-{
-  umph_interface_t* p_ump = find_itf_by_daddr(daddr);
-  if (p_ump) return p_ump;
-
   for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
   {
     if (_umph_itf[i].daddr == 0)
@@ -172,10 +173,48 @@ static umph_interface_t* find_or_alloc_itf(uint8_t daddr)
   return NULL;
 }
 
+// Unmerged-shape enumeration (separate open() calls for the AC and MS
+// interfaces) needs to pair a just-seen MIDIStreaming interface with the
+// *correct* previously-opened, still-unpaired AudioControl interface when a
+// device has more than one candidate AC slot pending. USB interface
+// numbering convention places an MS interface immediately after its
+// associated AC interface, so match on itf_num_ac + 1 == ms_itf_num rather
+// than just "any pending AC slot for this daddr".
+static umph_interface_t* find_pending_ac_itf(uint8_t daddr, uint8_t ms_itf_num)
+{
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && p->itf_num == 0xFF && p->itf_num_ac != 0xFF &&
+        (uint8_t) (p->itf_num_ac + 1) == ms_itf_num)
+      return p;
+  }
+  return NULL;
+}
+
+// A device may have multiple slots (one per AC/MS interface grouping) --
+// search all of them rather than assuming the first daddr match is the
+// right one.
 static umph_interface_t* find_itf(uint8_t daddr, uint8_t itf_num)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(daddr);
-  if (p_ump && (p_ump->itf_num == itf_num || p_ump->itf_num_ac == itf_num)) return p_ump;
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && (p->itf_num == itf_num || p->itf_num_ac == itf_num)) return p;
+  }
+  return NULL;
+}
+
+// Same rationale as find_itf() -- a device's dangling (unpaired) AC-only
+// slot has ep_in == ep_out == 0, so a first-daddr-match lookup could return
+// the wrong slot and silently drop the mounted interface's traffic.
+static umph_interface_t* find_itf_by_ep(uint8_t daddr, uint8_t ep_addr)
+{
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p = &_umph_itf[i];
+    if (p->daddr == daddr && (p->ep_in == ep_addr || p->ep_out == ep_addr)) return p;
+  }
   return NULL;
 }
 
@@ -219,6 +258,14 @@ static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
   p_ump->num_gtb = 0;
   if ( (p_ump->num_in_jacks == 0 && p_ump->num_out_jacks == 0) || CFG_TUH_UMP_MAX_GTB == 0 ) return;
 
+  // Number of real cables/groups multiplexed onto this endpoint pair: at least 1, and at least
+  // as many as the largest bNumEmbMIDIJack seen on either endpoint's CS_ENDPOINT descriptor (a
+  // device can carry more than one embedded MIDI1 jack pair over a single bulk endpoint pair via
+  // USB-MIDI 1.0 Cable Number -- e.g. a controller with two independent physical DIN ports).
+  uint8_t num_groups = p_ump->max_emb_jacks_per_ep;
+  if (num_groups == 0) num_groups = 1;
+  if (num_groups > UMPH_MAX_NUM_GROUPS_CABLES) num_groups = UMPH_MAX_NUM_GROUPS_CABLES;
+
   midi2_desc_group_terminal_block_t* blk = &p_ump->gtb[0];
   tu_memclr(blk, sizeof(*blk));
   blk->bLength            = sizeof(midi2_desc_group_terminal_block_t);
@@ -228,15 +275,15 @@ static void umph_synthesize_gtb_from_jacks(umph_interface_t* p_ump)
   blk->bGrpTrmBlkType     = 0x00; // bidirectional (best-effort default; a legacy MIDI1 device's jack
                                    // graph doesn't map 1:1 onto GTB direction semantics)
   blk->nGroupTrm          = 0;
-  blk->nNumGroupTrm        = 1;
+  blk->nNumGroupTrm        = num_groups;
   blk->iBlockItem         = 0;
   blk->bMIDIProtocol      = 0x01; // USB MIDI 1.0 up to 64 bits
   blk->wMaxInputBandwidth  = 0;   // unknown/not fixed
   blk->wMaxOutputBandwidth = 0;
   p_ump->num_gtb = 1;
 
-  TU_LOG_USBH("UMPH: synthesized 1 Group Terminal Block from %u in / %u out MIDI1 jack(s)\r\n",
-             p_ump->num_in_jacks, p_ump->num_out_jacks);
+  TU_LOG_USBH("UMPH: synthesized 1 Group Terminal Block (numGroups=%u) from %u in / %u out MIDI1 jack(s)\r\n",
+             num_groups, p_ump->num_in_jacks, p_ump->num_out_jacks);
 }
 
 //--------------------------------------------------------------------+
@@ -282,6 +329,16 @@ static void umph_parse_endpoints(umph_interface_t* p_ump, uint8_t alt_setting,
       // trailing class-specific MIDI streaming endpoint descriptor (associates GTB via bAssoGrpTrmBlkID)
       if ( drv_len < max_len && TUSB_DESC_CS_ENDPOINT == tu_desc_type(p_desc) )
       {
+        // Alt-0 (legacy MIDI 1.0) CS_ENDPOINT layout: bLength, bDescriptorType, bDescriptorSubType,
+        // bNumEmbMIDIJack, baAssocJackID[bNumEmbMIDIJack] -- bNumEmbMIDIJack at byte offset 3 is the
+        // real cable/group count multiplexed onto this endpoint (a device can embed more than one
+        // MIDI1 jack pair on a single bulk endpoint pair via USB-MIDI 1.0 Cable Number).
+        if (alt_setting == 0 && tu_desc_len(p_desc) >= 4)
+        {
+          uint8_t const num_emb_jack = p_desc[3];
+          if (num_emb_jack > p_ump->max_emb_jacks_per_ep) p_ump->max_emb_jacks_per_ep = num_emb_jack;
+        }
+
         drv_len += tu_desc_len(p_desc);
         p_desc   = tu_desc_next(p_desc);
       }
@@ -404,7 +461,7 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
       p_desc   = tu_desc_next(p_desc);
     }
 
-    umph_interface_t* p_ump = find_or_alloc_itf(dev_addr);
+    umph_interface_t* p_ump = alloc_new_itf(dev_addr);
     TU_ASSERT(p_ump);
     p_ump->itf_num_ac = itf_desc->bInterfaceNumber;
 
@@ -425,7 +482,8 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
 
   if ( AUDIO_SUBCLASS_MIDI_STREAMING == itf_desc->bInterfaceSubClass )
   {
-    umph_interface_t* p_ump = find_or_alloc_itf(dev_addr);
+    umph_interface_t* p_ump = find_pending_ac_itf(dev_addr, itf_desc->bInterfaceNumber);
+    if (!p_ump) p_ump = alloc_new_itf(dev_addr);
     TU_ASSERT(p_ump);
 
     uint16_t drv_len = tu_desc_len(itf_desc);
@@ -686,7 +744,7 @@ bool umph_set_config(uint8_t dev_addr, uint8_t itf_num)
 
 bool umph_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
+  umph_interface_t* p_ump = find_itf_by_ep(dev_addr, ep_addr);
   TU_VERIFY(p_ump);
 
   TU_LOG_USBH("UMPH: xfer_cb daddr=%u ep=0x%02x result=%d bytes=%lu\r\n",
@@ -732,15 +790,20 @@ bool umph_deinit(void)
 
 void umph_close(uint8_t dev_addr)
 {
-  umph_interface_t* p_ump = find_itf_by_daddr(dev_addr);
-  if (!p_ump) return;
+  // A device may hold more than one slot (one per AC/MS interface grouping)
+  // -- clear all of them, not just the first match.
+  for (uint8_t i = 0; i < CFG_TUH_UMP; i++)
+  {
+    umph_interface_t* p_ump = &_umph_itf[i];
+    if (p_ump->daddr != dev_addr) continue;
 
-  uint8_t const itf_num = p_ump->itf_num;
-  bool const was_mounted = p_ump->mounted;
+    uint8_t const itf_num = p_ump->itf_num;
+    bool const was_mounted = p_ump->mounted;
 
-  tu_memclr(p_ump, sizeof(*p_ump));
+    tu_memclr(p_ump, sizeof(*p_ump));
 
-  if (was_mounted && tuh_ump_umount_cb) tuh_ump_umount_cb(dev_addr, itf_num);
+    if (was_mounted && tuh_ump_umount_cb) tuh_ump_umount_cb(dev_addr, itf_num);
+  }
 }
 
 //--------------------------------------------------------------------+
