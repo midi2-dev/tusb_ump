@@ -2,7 +2,7 @@
  * The MIT License (MIT)
  *
  * Copyright (c) 2019 Ha Thach (tinyusb.org)
- * Copyright (c) 2022 Michael Loh (AmeNote.com)
+ * Copyright (c) 2023-2026 Michael Loh (AmeNote.com)
  * Copyright (c) 2022 Franz Detro (native-instruments.de)
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy

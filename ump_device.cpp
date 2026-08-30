@@ -2,7 +2,7 @@
  * The MIT License (MIT)
  *
  * Copyright (c) 2019 Ha Thach (tinyusb.org)
- * Copyright (c) 2022 Michael Loh (AmeNote.com)
+ * Copyright (c) 2023-2026 Michael Loh (AmeNote.com)
  *
  * NOTE: Code adjustments made to support USB MIDI 2.0 UMP Packet format as
  * Alternate Interface 1. See USB Device Class Definition for MIDI Devices,
@@ -66,18 +66,11 @@
 //--------------------------------------------------------------------+
 // TinyUSB API compatibility
 //
-// The ESP-IDF TinyUSB fork (shipped by arduino-esp32 3.x) is versioned
-// 0.18 (TUSB_VERSION_NUMBER = 1800) but retains the PRE-0.16 upstream
-// signatures:
-//   usbd_edpt_xfer — 4 args, no is_isr
-//   tu_fifo_config — 5 args, with item_size
-//
-// The upstream TinyUSB 0.16 briefly added `is_isr` and removed
-// `item_size`, then 0.17+ reverted `is_isr`. The IDF fork never
-// adopted those transient changes.
-//
-// Detection: sdkconfig.h is always present in ESP-IDF builds and
-// never in standalone TinyUSB — use it to identify the IDF fork.
+// The ESP-IDF TinyUSB fork (arduino-esp32 3.x) reports version 0.18 but
+// keeps pre-0.16 signatures (usbd_edpt_xfer: 4 args, no is_isr;
+// tu_fifo_config: 5 args, with item_size) rather than the 0.17+ upstream
+// ones. sdkconfig.h exists only in ESP-IDF builds, so it's used to detect
+// the fork and pick the matching call shape below.
 //--------------------------------------------------------------------+
 #if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 1600 && \
     TUSB_VERSION_NUMBER < 1700 && !__has_include(<sdkconfig.h>)
@@ -105,7 +98,9 @@
 // ENDIAN HELPERS
 //--------------------------------------------------------------------+
 // UMP_HOST_BSWAP32 / UMP_WIRE_BSWAP32 are defined in ump.h, shared with
-// ump_host.cpp. See that header for the internal-vs-wire layout distinction.
+// ump_host.cpp. See that header for the internal-vs-wire layout distinction
+// (upstream's version of this comment/macro pair, pre-dating that shared
+// header, is preserved there instead of duplicated here).
 //
 // tud_ump_read()/tud_ump_write() intentionally preserve this driver's
 // existing raw behavior -- no conversion -- for applications already
@@ -308,8 +303,10 @@ uint8_t tud_alt_setting( uint8_t itf) {
  * @param itf       interface number
  * @param pkts      Array of 32 bit formatted UMP packet data.
  * @param numAvail  Number of 32 bit UMP words that are available in handle
- *                  to populate. Note to accomodate possible SYSEX, needs to be at least 2
- *                  for 64bit size UMP Packet.
+ *                  to populate. A pending SYSEX-producing word (64-bit UMP
+ *                  packet) is only converted once 2 words of space remain;
+ *                  it is otherwise deferred to the next call rather than
+ *                  overflowing the buffer.
  * @param hostOrder If true, each returned word is the host-native uint32_t
  *                  whose arithmetic value matches the UMP wire word (bits
  *                  31:28 = message type, etc, per the MIDI 2.0 UMP spec) --
@@ -323,25 +320,54 @@ static uint16_t tud_ump_read_impl( uint8_t itf, uint32_t *pkts, uint16_t numAvai
 {
   umpd_interface_t* ump = &_umpd_itf[itf];
   uint16_t numRead = 0;
-  uint16_t numProcessed = 0;
-
-  static UMP_PACKET umpPacket;
 
   TU_VERIFY(ump->ep_out);
 
   // Determine if MIDI 1
   if (!ump->ump_interface_selected)
   {
-    // Always look for enough space to process in a SYSEX message
-    while ((numAvail - numProcessed) >= 2)
+    // Loop while there's at least 1 free output slot. A raw USB-MIDI1 word
+    // converts to either 1 UMP word (Channel Voice, System Common) or 2 (a
+    // 64-bit SYSEX7 packet), so peek the next word's CIN first and only
+    // require 2 free slots when it's SYSEX-producing -- this bounds output
+    // against numAvail without needlessly stalling on 1-word messages when
+    // only 1 slot remains.
+    while ((numAvail - numRead) >= 1)
     {
+      uint8_t peekBuf[2];
+      if (tu_fifo_peek_n(&ump->rx_ff, peekBuf, sizeof(peekBuf)) != sizeof(peekBuf))
+      {
+        goto END_READ;
+      }
+
+      // Mirror tud_USBMIDI1ToUMP()'s reassignment of a real-time System
+      // message (CIN 15, data byte's high bit set) to CIN 5 (SYSEX_END_1BYTE)
+      // so the word-count estimate here matches what conversion will do.
+      // That reassigned case converts to a single 1-word UMP System message,
+      // not the 2-word SysEx7 completion a literal CIN 5 produces, so it's
+      // excluded from needsTwoWords below.
+      uint8_t code_index = peekBuf[0] & 0x0f;
+      bool isReassignedRealtime = false;
+      if (code_index == MIDI_1_CIN_1BYTE_DATA && (peekBuf[1] & 0x80))
+      {
+        code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
+        isReassignedRealtime = true;
+      }
+      bool needsTwoWords = (code_index == MIDI_1_CIN_SYSEX_START)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_1BYTE && !isReassignedRealtime)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_2BYTE)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_3BYTE);
+      if (needsTwoWords && (numAvail - numRead) < 2)
+      {
+        break;
+      }
+
       // Get next word from USB
       uint32_t readWord;
       if (tu_fifo_read_n(&ump->rx_ff, (void *)&readWord, sizeof(uint32_t)) != sizeof(uint32_t) )
       {
         goto END_READ;
       }
-      numProcessed++;
       //readWord = RtlUlongByteSwap(readWord);
 
       if (readWord)
@@ -476,7 +502,6 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
   TU_VERIFY(ump->ep_out);
 
   uint16_t    numProcessed = 0;
-  uint8_t     *pBuffer = (uint8_t *)words;
   bool        bEnterSysex;
   bool        bEndSysex;
   uint8_t     numberBytes;
@@ -607,6 +632,13 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
           }
           break;
 
+        // A UMP SysEx7 (64-bit data) packet carries up to 6 payload bytes, but a
+        // USB-MIDI1 SysEx report is 4 bytes carrying at most 3 payload bytes, and
+        // the two packet boundaries don't line up. sysexBS is a per-cable ring
+        // buffer that decouples "bytes queued from this UMP packet" from "bytes
+        // emittable in the next 4-byte report": bytes are pushed in below in
+        // whatever count the UMP packet delivers, then drained 1-3 at a time
+        // into successive USB-MIDI1 reports until empty.
         case UMP_MT_DATA_64:
           bEnterSysex = false;
           bEndSysex = false;
@@ -949,8 +981,53 @@ uint16_t umpd_open(uint8_t rhport, tusb_desc_interface_t const * desc_itf, uint1
     p_desc   = tu_desc_next(p_desc);
   }
 
-  // See if there is an alternate interface for UMP USB MIDI 2.0
-  if ( TUSB_DESC_INTERFACE == tu_desc_type(p_desc) ) drv_len = max_len;
+  // See if there is an alternate interface for UMP USB MIDI 2.0 (bAlternateSetting 1,
+  // same bInterfaceNumber) immediately following. A config descriptor can hold more
+  // than one USB Function (e.g. this one plus an unrelated CDC/vendor Function), so
+  // drv_len must reflect only what this interface's own descriptor block consumes --
+  // walk it explicitly (same pattern as Alternate Setting 0 above) rather than
+  // assuming nothing else follows, or TinyUSB's driver-dispatch loop will believe
+  // umpd_open() consumed the whole descriptor and skip any Function after this one.
+  // The alt setting's endpoint descriptors reuse Alt 0's addresses (USB MIDI 2.0
+  // Alt-Setting model), so measure their length without calling usbd_edpt_open() again.
+  while ( TUSB_DESC_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+  {
+    tusb_desc_interface_t const * desc_alt = (tusb_desc_interface_t const *) p_desc;
+    if ( desc_alt->bInterfaceNumber != desc_ump->bInterfaceNumber ) break; // next Function's interface, not an alt setting of this one
+
+    drv_len += tu_desc_len(p_desc);
+    p_desc   = tu_desc_next(p_desc);
+
+    // Skip class-specific descriptors (MS Header etc)
+    while ( TUSB_DESC_CS_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+    {
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+
+    // Skip this alt setting's endpoint descriptors (+ their class-specific descriptors)
+    uint8_t alt_found_endpoints = 0;
+    while ( (alt_found_endpoints < desc_alt->bNumEndpoints) && (drv_len <= max_len) )
+    {
+      if ( TUSB_DESC_ENDPOINT == tu_desc_type(p_desc) )
+      {
+        // Same endpoint address as Alternate Setting 0 -- already opened, do not reopen
+        drv_len += tu_desc_len(p_desc);
+        p_desc   = tu_desc_next(p_desc);
+        alt_found_endpoints += 1;
+      }
+
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+
+    // Finish off any further class specific definitions for this alt setting
+    while ( TUSB_DESC_CS_INTERFACE == tu_desc_type(p_desc) && drv_len <= max_len )
+    {
+      drv_len += tu_desc_len(p_desc);
+      p_desc   = tu_desc_next(p_desc);
+    }
+  }
 
   // Prepare for incoming data
   _prep_out_transaction(p_ump);
@@ -966,7 +1043,23 @@ bool umpd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t 
   // nothing to with DATA & ACK stage
   if (stage != CONTROL_STAGE_SETUP) return true;
 
-  umpd_interface_t* ump = &_umpd_itf[rhport];
+  // Interface-addressed requests (SET_INTERFACE, GTB GET_DESCRIPTOR) carry the
+  // target interface number in wIndex, not the controller/root-hub-port index --
+  // resolve the matching UMP instance by itf_num, same pattern umpd_xfer_cb()
+  // already uses (matched by endpoint address there instead). This only matters
+  // once CFG_TUD_UMP > 1: with a single instance any indexing scheme happens to
+  // resolve to it.
+  uint8_t itf_num = tu_u16_low(request->wIndex);
+  umpd_interface_t* ump = NULL;
+  for (uint8_t i = 0; i < CFG_TUD_UMP; i++)
+  {
+    if (_umpd_itf[i].itf_num == itf_num)
+    {
+      ump = &_umpd_itf[i];
+      break;
+    }
+  }
+  TU_VERIFY(ump);
 
   switch ( request->bRequest )
   {
@@ -1057,63 +1150,29 @@ bool umpd_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_
   return true;
 }
 
+/**
+ * Convert one USB-MIDI1 32-bit word packet to a UMP packet. Populates only
+ * UMP message types 1 (System), 2 (MIDI 1.0 Channel Voice), and 3 (64-bit
+ * data / SysEx7); callers needing MIDI 2.0 Channel Voice must convert
+ * separately.
+ *
+ * Refined from the USB MIDI 2.0 Host Driver contributed to Windows by the
+ * Association of Musical Electronics Industry and Microsoft; driver source
+ * further developed by AmeNote.
+ *
+ * @param usbMidi1Pkt  The USB MIDI 1.0 packet as a 32-bit word.
+ * @param pbIsInSysex  In/out SysEx state for this USB-MIDI1 data stream;
+ *                     caller owns and persists it across calls, starting false.
+ * @param umpPkt       Output UMP packet. Data beyond wordCount is left
+ *                     unwritten -- callers must not read past wordCount.
+ * @return bool        true if umpPkt was populated, false otherwise.
+ */
 bool
 tud_USBMIDI1ToUMP(
     uint32_t        usbMidi1Pkt,
     bool*           pbIsInSysex,
     PUMP_PACKET     umpPkt
 )
-/*++
-Routine Description:
-
-    Helper routine to handle conversion of USB MIDI 1.0 32 bit word packet
-    to UMP formatted packet. The routine will only populate UMP message
-    types 1: System, 2: MIDI 1.0 Channel Voice, and 3: 64 bit data (SYSEX)
-    messages. It is rsponsibility of other routines to convert between
-    MIDI 2.0 Channel voice if needed.
-
-  NOTE: This routine was refined from the USB MIDI 2.0 Host Driver developed as open
-  source to be included in Windows by the Association of Musical Electronics Industry.
-
-Copyright 2023 Association of Musical Electronics Industry
-Copyright 2023 Microsoft
-Driver source code developed by AmeNote. Some components Copyright 2023 AmeNote Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Arguments:
-
-    usbMidi1Pkt:    The USB MIDI 1.0 packet presented as a 32 bit word
-    pbIsInSysex:    Reference to boolean variable where to store if processing
-                    a SYSEX message or not. Note that calling funciton is
-                    responsible to maintain this state for each USB MIDI 1.0
-                    data stream to process. The intial value should be false.
-    umpPkt:         Reference to data location to create UMP packet into. Note
-                    that for optimizations, the data beyond wordCount is not
-                    cleared, therefore calling function should not process beyond
-                    wordCount or zero any additional dataspace.
-
-Return Value:
-
-    bool:           Indicates true of umpPkt is ready, false otherwise.
-
---*/
 {
     // Checked passed parameters
     if (!usbMidi1Pkt || !pbIsInSysex || !umpPkt)
@@ -1203,11 +1262,15 @@ Return Value:
         if ( (pBuffer[1] & 0x80) // most significant bit set and not sysex ending
             && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
         {
+            // A single-byte System message is one 32-bit UMP word (MT=1),
+            // not a 64-bit SysEx7 packet -- fill and pad it directly rather
+            // than falling into the 2-word SysEx completion path below.
             umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
             umpPkt->umpData.umpBytes[1] = pBuffer[1];
-            firstByte = 1;
-            lastByte = 1;
-            goto COMPLETE_1BYTE;
+            umpPkt->umpData.umpBytes[2] = 0x00;
+            umpPkt->umpData.umpBytes[3] = 0x00;
+            umpPkt->wordCount = 1;
+            break;
         }
 
         umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
@@ -1227,7 +1290,6 @@ Return Value:
             return false;
         }
 
-COMPLETE_1BYTE:
         umpPkt->wordCount = 2;
         // Transfer in bytes
         copyPos = firstByte;
@@ -1339,6 +1401,18 @@ COMPLETE_1BYTE:
 
     return true;
 }
+
+#ifdef UMP_DEVICE_UNIT_TEST
+void tud_ump_test_set_ep_out(uint8_t itf, uint8_t ep_out)
+{
+    _umpd_itf[itf].ep_out = ep_out;
+}
+
+uint16_t tud_ump_test_rx_write(uint8_t itf, const uint8_t* data, uint16_t n)
+{
+    return tu_fifo_write_n(&_umpd_itf[itf].rx_ff, data, n);
+}
+#endif
 
 } // extern "C"
 #endif
