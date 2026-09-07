@@ -2,33 +2,53 @@
      alt="AmeNote Logo"
      style="center; margin-right: 100px;" />
 
-# AmeNote<sup>TM</sup> tusb_ump Device Driver for tinyUSB
+# AmeNote<sup>TM</sup> tusb_ump Device and Host Drivers for tinyUSB
 
-A TinyUSB device class driver implementing the USB Device Class Definition
-for MIDI Devices v2.0: a single MIDIStreaming interface exposing both
-Alternate Setting 0 (legacy USB-MIDI 1.0 byte stream) and Alternate Setting 1
-(native Universal MIDI Packet / USB MIDI 2.0), converting transparently
-between them so application code only ever handles UMP words.
+TinyUSB class drivers implementing the USB Device Class Definition for MIDI
+Devices v2.0: a single MIDIStreaming interface exposing both Alternate
+Setting 0 (legacy USB-MIDI 1.0 byte stream) and Alternate Setting 1 (native
+Universal MIDI Packet / USB MIDI 2.0), converting transparently between them
+so application code only ever handles UMP words.
 
-This document assumes familiarity with TinyUSB's device stack (class driver
-registration, endpoint/descriptor conventions, `tud_task()`) and with USB in
-general; it covers what's specific to this driver, not USB or TinyUSB basics.
+Two drivers, sharing the same descriptor/conversion model from opposite
+sides of the USB connection:
+
+- **`ump_device.h`/`ump_device.cpp`** -- your board *is* the USB MIDI
+  device, presented to a host computer/DAW. See [Device API](#device-api)
+  below.
+- **`ump_host.h`/`ump_host.cpp`** -- your board *is* the USB host, bridging
+  to a directly- or hub-attached USB MIDI device. See [Host API](#host-api)
+  below. **Scope note:** the host driver implements transport + Group
+  Terminal Block descriptor discovery only -- it does not yet implement the
+  UMP Stream-message handshake (Endpoint Discovery / Function Block
+  Discovery / Stream Configuration). If your application needs that
+  negotiation, layer it on top as ordinary UMP messages sent/received
+  through `tuh_ump_read()`/`tuh_ump_write()`.
+
+This document assumes familiarity with TinyUSB's device and host stacks
+(class driver registration, endpoint/descriptor conventions, `tud_task()`/
+`tuh_task()`) and with USB in general; it covers what's specific to these
+drivers, not USB or TinyUSB basics.
 
 ## Why one driver handles both alt settings
 
-A USB MIDI 2.0 host negotiates Alt Setting 1 and talks UMP directly. A host
+A USB MIDI 2.0 peer negotiates Alt Setting 1 and talks UMP directly. A peer
 that only understands USB MIDI 1.0 stays on Alt Setting 0, sending/receiving
 the legacy 4-byte USB-MIDI1 packet format. Both alt settings share the same
 endpoint pair, so the driver -- not the application -- is what needs to know
-which wire format is active on a given call; `ump_interface_selected` tracks
-that per interface instance and both directions dispatch on it.
+which wire format is active on a given call. In the device driver,
+`ump_interface_selected` tracks that per interface instance and both
+directions dispatch on it; the host driver tracks the same thing per
+attached device (`tuh_ump_alt_setting()`), reflecting whatever alt setting
+the attached device advertised/negotiated during enumeration.
 
 Application code always works in UMP words regardless of which alt setting
-the host picked: `tud_ump_read*()` always returns UMP words (converting from
-USB-MIDI1 if Alt 0 is active), and `tud_ump_write*()` always accepts UMP
-words (converting to USB-MIDI1 if Alt 0 is active).
+is active: the `*_read*()` functions always return UMP words (converting
+from USB-MIDI1 if Alt 0 is active), and the `*_write*()` functions always
+accept UMP words (converting to USB-MIDI1 if Alt 0 is active) -- on both
+the device and host side.
 
-## API surface
+## Device API
 
 | Function | Direction | Endianness |
 |---|---|---|
@@ -56,7 +76,68 @@ message), so it's bounded against remaining output space, not input words
 consumed -- passing a 1-word buffer is enough for any message, no special
 sizing is required.
 
-## Conversion logic
+## Host API
+
+The host driver identifies an attached UMP interface by `(daddr, itf_num)`
+rather than a single "the device" global, since more than one USB MIDI
+device can be attached at once (e.g. several behind a hub) -- see
+`CFG_TUH_UMP` below.
+
+| Function | Direction | Endianness |
+|---|---|---|
+| `tuh_ump_read_ntoh` | read | host-native arithmetic value (MT in bits 31:28) -- recommended |
+| `tuh_ump_read` | read | raw byte-buffer reinterpretation, host-endian dependent -- legacy |
+| `tuh_ump_write_hton` | write | host-native arithmetic value -- recommended |
+| `tuh_ump_write` | write | raw byte-buffer reinterpretation, host-endian dependent -- legacy |
+
+Same recommendation as the device API: use the `_ntoh`/`_hton` variants in
+new code.
+
+`tuh_ump_mounted`, `tuh_ump_available`, `tuh_ump_writeable`, and
+`tuh_ump_alt_setting` report interface/FIFO state for a given `(daddr,
+itf_num)`. `tuh_ump_get_bcd_msc` returns the MIDIStreaming class spec
+version the device reported for its currently active alt setting.
+`tuh_ump_get_group_terminal_blocks` returns the parsed (or, for
+alt-setting-0-only devices, synthesized) Group Terminal Block entries
+discovered during enumeration -- see `ump_host.h` for exact signatures.
+
+`tuh_ump_mount_cb`/`tuh_ump_umount_cb`/`tuh_ump_rx_cb` are optional weak
+callbacks an application can override, invoked on interface mount/unmount
+and on new incoming data respectively -- mirroring the device driver's
+`tud_ump_rx_cb`. A `tuh_ump_raw_rx_cb` diagnostic-only callback is also
+available (raw bytes off the IN endpoint before UMP/MIDI1 translation),
+useful for bring-up but superseded by `tuh_ump_read()`/`tuh_ump_read_ntoh()`
+for real application use.
+
+### Host driver configuration
+
+Set these before including `ump_host.h` (typically in `tusb_config.h`):
+
+| Macro | Default | Meaning |
+|---|---|---|
+| `CFG_TUH_UMP` | `1` | Number of concurrent UMP host interfaces (instances) supported -- raise this to talk to multiple USB MIDI devices at once (e.g. several behind a hub). |
+| `CFG_TUH_UMP_MAX_GTB` | `8` | Max Group Terminal Block entries parsed/synthesized per interface, bounding memory regardless of what a device claims in its descriptor's `wTotalLength`. |
+| `CFG_TUH_UMP_EP_BUFSIZE` | `64` (FS) / `512` (HS) | Endpoint transfer buffer size. |
+| `CFG_TUH_UMP_RX_BUFSIZE` / `CFG_TUH_UMP_TX_BUFSIZE` | `CFG_TUH_UMP_EP_BUFSIZE` | FIFO sizes for the read/write word pump. |
+
+You'll also need TinyUSB's own host-stack macros set appropriately for your
+target -- `CFG_TUH_ENABLED`, `BOARD_TUH_RHPORT`, `CFG_TUH_HUB` (if devices
+may be attached through a hub), `CFG_TUH_DEVICE_MAX`, etc. See
+[`examples/tusb_ump_host_demo/src/tusb_config.h`](examples/tusb_ump_host_demo/src/tusb_config.h)
+for a fully-commented working configuration, including the rationale behind
+each non-default value.
+
+## Conversion logic (Alt Setting 0 <-> UMP)
+
+The diagrams below trace `ump_device.cpp`'s alt-0 conversion paths in
+detail. `ump_host.cpp` implements the mirror image of the same logic from
+the host side -- translating an attached alt-0 device's outgoing
+USB-MIDI1 words into UMP on read, and an application's outgoing UMP words
+into USB-MIDI1 on write -- so the same message-type/CIN mapping and SysEx7
+reassembly rules apply, with per-cable state (`midi1_rx_is_in_sysex[]`,
+`midi1_tx_sysex[]`) tracked per attached device instance rather than a
+single global set, since more than one USB MIDI device can be mounted at
+once. See `ump_host.cpp`'s own comments for the exact mirroring.
 
 ### USB-MIDI1 to UMP (read path, Alt Setting 0)
 
@@ -117,18 +198,29 @@ flowchart TD
 
 ## Examples
 
-- [`examples/tusb_ump_lb`](examples/tusb_ump_lb) -- minimal loopback reference
-  for the descriptor layout and read/write API on a Raspberry Pi Pico
-  (RP2040); the best starting point for a new integration.
+- [`examples/tusb_ump_lb`](examples/tusb_ump_lb) -- minimal **device**-role
+  loopback reference for the descriptor layout and read/write API on a
+  Raspberry Pi Pico (RP2040); the best starting point for a new device-side
+  integration.
+- [`examples/tusb_ump_host_demo`](examples/tusb_ump_host_demo) -- **host**-role
+  reference/bring-up app on a Raspberry Pi Pico (RP2040): prints attached
+  USB device identification and Group Terminal Block info, decodes and
+  prints every incoming UMP word, and injects a test Note On/Off to
+  exercise the write path. The best starting point for a new host-side
+  integration.
 - [`examples/T-Display-S3-ESP32-S3-MIDI2-PingPong`](examples/T-Display-S3-ESP32-S3-MIDI2-PingPong)
   and [`examples/T-PicoC3-MIDI2-PingPong`](examples/T-PicoC3-MIDI2-PingPong) --
-  community-contributed board-specific examples.
+  community-contributed board-specific (device-role) examples.
 
 ## Testing
 
-[`test/host`](test/host) is a hardware-free regression suite for the
+[`test/host`](test/host) is a hardware-free regression suite (runs on your
+development machine, not USB host role) for `ump_device.cpp`'s
 legacy-alt-setting conversion paths (buffer-space bounding, byte continuity
-across split reads). Run with `make check`; no cross toolchain needed.
+across split reads). Run with `make check`; no cross toolchain needed. There
+is no equivalent native suite for `ump_host.cpp` yet -- it's currently
+validated via [`examples/tusb_ump_host_demo`](examples/tusb_ump_host_demo)
+against real hardware.
 
 ## MIDI Association ([www.midi.org](http://www.midi.org))
 These drivers were developed and tested in conjunction of the ProtoZOA <sup>TM</sup> MIDI 2.0 Prototyping tool which was developed to support the MIDI Association towards their mission for corporate members to:
@@ -168,7 +260,7 @@ We wish to thank and acknowledge all contributors to this project. In particular
 
 | Name  | Organization  | Email  | Contribution  |
 |:----------|:----------|:----------|:----------|
-| Michael Loh    | AmeNote    | [mloh@AmeNote.com ](mailto:mloh@AmeNote.com)   | tinyUSB MIDI 2.0 Device Driver initial integration and other low level components.    |
+| Michael Loh    | AmeNote    | [mloh@AmeNote.com ](mailto:mloh@AmeNote.com)   | tinyUSB MIDI 2.0 Device Driver initial integration and other low level components; USB Host UMP class driver.    |
 | Mike Kent    | AmeNote    | [mikekent@AmeNote.com](mailto:mikekent@AmeNote.com)    | Concept, Architecture, MIDI 2.0 Technical Support.    |
 | Andrew Mee    | AmeNote (consultant)    | [primary.edw@gmail.com ](mailto:primary.edw@gmail.com)   | Various firmware integration, MIDI 2.0 and UMP libraries, Capability Inquiry, MIDI 2.0 Technical support, testing.    |
 | Franz Detro | Native Instruments | [franz.detro@native-instruments.de](mailto:franz.detro@native-instruments.de) | Inputs into usb midi 2.0 class driver to clean up descriptors and control endpoint sync. |
