@@ -97,32 +97,15 @@
 //--------------------------------------------------------------------+
 // ENDIAN HELPERS
 //--------------------------------------------------------------------+
-// Two distinct byte orders are in play, don't conflate them:
+// UMP_HOST_BSWAP32 / UMP_WIRE_BSWAP32 are defined in ump.h, shared with
+// ump_host.cpp. See that header for the internal-vs-wire layout distinction
+// (upstream's version of this comment/macro pair, pre-dating that shared
+// header, is preserved there instead of duplicated here).
 //
-// 1. INTERNAL (UMP_PACKET.umpData.umpBytes[]): this driver's own CIN
-//    translation logic builds/reads messages with umpBytes[0] = the MT/group
-//    byte, matching the UMP spec's logical (most-significant-byte-first)
-//    view. UMP_HOST_BSWAP32 converts a host-native arithmetic uint32_t (MT in
-//    bits 31:28) into/out of that layout, portably regardless of host
-//    endianness.
-//
-// 2. WIRE (native alt-setting-1 passthrough, raw endpoint FIFO bytes): per
-//    USB Device Class Definition for MIDI Devices v2.0 section 3.2.2, each
-//    32-bit UMP word is sent least-significant-byte-first on the wire (byte 0
-//    = LSB, byte 3 = MT/group). UMP_WIRE_BSWAP32 converts a host-native
-//    arithmetic uint32_t into/out of that little-endian wire layout -- a
-//    no-op on a little-endian host, a swap on a big-endian one.
-//
-// tud_ump_read()/tud_ump_write() keep this driver's original raw behavior
-// (no conversion) for existing callers. Use tud_ump_read_ntoh()/
-// tud_ump_write_hton() for portable, spec-correct behavior in new code.
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-  #define UMP_HOST_BSWAP32(x) (x)
-  #define UMP_WIRE_BSWAP32(x) __builtin_bswap32(x)
-#else
-  #define UMP_HOST_BSWAP32(x) __builtin_bswap32(x)
-  #define UMP_WIRE_BSWAP32(x) (x)
-#endif
+// tud_ump_read()/tud_ump_write() intentionally preserve this driver's
+// existing raw behavior -- no conversion -- for applications already
+// built against it. Use tud_ump_read_ntoh()/tud_ump_write_hton() for
+// portable, spec-correct behavior in new code.
 
 //--------------------------------------------------------------------+
 // APP SPECIFIC DRIVERS

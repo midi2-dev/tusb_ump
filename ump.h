@@ -89,6 +89,45 @@
 #define UMP_SYSTEM_RESET        0xff  // status byte only
 
 //--------------------------------------------------------------------+
+// ENDIAN HELPERS
+//--------------------------------------------------------------------+
+// Two distinct byte-order concerns apply to UMP words -- do not conflate them.
+// Shared here so both the device (ump_device.cpp) and host (ump_host.cpp)
+// drivers use one definition instead of risking drift.
+//
+// 1. INTERNAL representation: driver code that extracts/builds message
+//    fields (e.g. the alt-setting-0 <-> alt-setting-1 MIDI 1.0 CIN
+//    translation switch/case logic) reads/builds messages assuming byte 0
+//    holds the MT/group byte, matching the UMP spec's logical/diagram view
+//    (most-significant byte first). UMP_HOST_BSWAP32 converts a host-native
+//    arithmetic uint32_t (MT in bits 31:28) into/out of that internal
+//    layout, portably regardless of host endianness.
+//
+// 2. WIRE byte order (raw bytes read from or written to the USB endpoint
+//    FIFOs for native alt-setting-1 passthrough): per the USB Device Class
+//    Definition for MIDI Devices v2.0, section 3.2.2 "UMP Messages in a USB
+//    Packet: Byte Ordering" -- "Each 32 bit word of a Universal MIDI Packet
+//    is sent with the least significant byte first" -- confirmed against
+//    real USB captures of a spec-compliant host (byte 0 on the wire is the
+//    word's LSB, byte 3 is the MT/group byte). UMP_WIRE_BSWAP32 converts a
+//    host-native arithmetic uint32_t into/out of that little-endian wire
+//    layout: a no-op on a little-endian host (its native memory layout
+//    already matches), a swap on a big-endian host.
+//
+// UMP_WIRE_BSWAP32 must be applied only at the FIFO/endpoint transfer
+// boundary -- never inside MIDI1<->UMP translation math, which stays in the
+// UMP_HOST_BSWAP32 internal logical layout throughout. Conflating the two
+// was the root cause of a real bug (see commit c090bbe, "Fix UMP wire byte
+// order for native alt-setting-1 passthrough").
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+  #define UMP_HOST_BSWAP32(x) (x)
+  #define UMP_WIRE_BSWAP32(x) __builtin_bswap32(x)
+#else
+  #define UMP_HOST_BSWAP32(x) __builtin_bswap32(x)
+  #define UMP_WIRE_BSWAP32(x) (x)
+#endif
+
+//--------------------------------------------------------------------+
 // Class Specific Descriptor
 //--------------------------------------------------------------------+
 

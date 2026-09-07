@@ -1,6 +1,6 @@
 #######################################
 # Syntax highlighting for tusb_ump
-# USB MIDI 2.0 UMP device driver
+# USB MIDI 2.0 UMP device and host drivers
 #######################################
 
 #######################################
@@ -24,6 +24,19 @@ tud_ump_rx_cb	KEYWORD2
 tud_ump_set_itf_cb	KEYWORD2
 tud_ump_get_req_itf_cb	KEYWORD2
 
+tuh_ump_mounted	KEYWORD2
+tuh_ump_available	KEYWORD2
+tuh_ump_writeable	KEYWORD2
+tuh_ump_write	KEYWORD2
+tuh_ump_write_hton	KEYWORD2
+tuh_ump_read	KEYWORD2
+tuh_ump_read_ntoh	KEYWORD2
+tuh_ump_alt_setting	KEYWORD2
+tuh_ump_get_group_terminal_blocks	KEYWORD2
+tuh_ump_mount_cb	KEYWORD2
+tuh_ump_umount_cb	KEYWORD2
+tuh_ump_rx_cb	KEYWORD2
+
 #######################################
 # Constants (LITERAL1)
 #######################################
@@ -46,3 +59,8 @@ CFG_TUD_UMP	LITERAL1
 CFG_TUD_UMP_EP_BUFSIZE	LITERAL1
 CFG_TUD_UMP_RX_BUFSIZE	LITERAL1
 CFG_TUD_UMP_TX_BUFSIZE	LITERAL1
+CFG_TUH_UMP	LITERAL1
+CFG_TUH_UMP_EP_BUFSIZE	LITERAL1
+CFG_TUH_UMP_RX_BUFSIZE	LITERAL1
+CFG_TUH_UMP_TX_BUFSIZE	LITERAL1
+CFG_TUH_UMP_MAX_GTB	LITERAL1
