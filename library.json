@@ -1,6 +1,6 @@
 {
   "name": "tusb_ump",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "USB MIDI 2.0 UMP device and host drivers for TinyUSB (midi2-dev/tusb_ump)",
   "keywords": ["midi", "midi2", "ump", "usb", "tinyusb"],
   "repository": {
