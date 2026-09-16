@@ -710,7 +710,21 @@ static void umph_process_set_config(tuh_xfer_t* xfer)
 bool umph_set_config(uint8_t dev_addr, uint8_t itf_num)
 {
   umph_interface_t* p_ump = find_itf(dev_addr, itf_num);
-  TU_VERIFY(p_ump);
+  if (!p_ump)
+  {
+    // This itf_num was bound to us by the core config-descriptor parser
+    // (e.g. it fell inside an IAD span whose first interface umph_open()
+    // recognized) but umph_open() didn't record a slot for it -- an
+    // interface shape this driver doesn't understand yet. TinyUSB's
+    // usbh_driver_set_config_complete() ignores our return value and
+    // won't retry or advance on its own, so silently failing here would
+    // stall enumeration for this device forever, including any later
+    // interfaces (e.g. a legacy MIDIStreaming interface after this one)
+    // that we *do* support. Ack and move on instead.
+    TU_LOG_USBH("UMPH: set_config itf_num=%u has no registered slot, skipping\r\n", itf_num);
+    usbh_driver_set_config_complete(dev_addr, itf_num);
+    return true;
+  }
 
   // AudioControl-only itf_num (unmerged enumeration shape): nothing to configure, just ack.
   if (itf_num == p_ump->itf_num_ac && itf_num != p_ump->itf_num)
