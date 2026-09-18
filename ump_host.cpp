@@ -568,16 +568,52 @@ static bool umph_ctrl_set_alt_interface(uint8_t daddr, uint8_t itf_num, uint8_t 
 // outrunning a slow reader. Mirrors ump_device.cpp's _prep_out_transaction(),
 // reversed (host reads FROM the device on ep_in, device reads FROM the host
 // on ep_out). Called after every IN completion and after every app read().
+// Request exactly one max-packet-sized read, never the whole buffer.
+//
+// A bulk IN transfer ends when the requested length is reached OR a short
+// packet arrives. Asking for sizeof(ep_in_buf) therefore does NOT mean "give
+// me whatever you have" -- it means "keep issuing IN tokens until you have
+// this much", and the host controller will happily stack up full packets for
+// as long as that takes.
+//
+// CFG_TUH_UMP_EP_BUFSIZE is 512 whenever the HOST CONTROLLER is high-speed
+// (TUH_OPT_HIGH_SPEED), which says nothing about the device on the other end.
+// A full-speed MIDI device has wMaxPacketSize 64, so a 512-byte request waits
+// for EIGHT full packets before completing. A device that pads its packets
+// with empty CIN-0 events -- common in class-compliant MIDI 1.0 gear -- never
+// sends the short packet that would terminate the transfer early, so it waits
+// for all eight every time.
+//
+// Measured on an MCXN947 (high-speed controller) with a full-speed MIDI 1.0
+// device: every completion carried exactly 512 bytes, and the MINIMUM gap
+// between completions was 77 ms, with most in the 50-200 ms range. All the
+// MIDI inside one of those lumps reaches the application at once, having been
+// held in the controller for up to a fifth of a second.
+//
+// Sizing the request to the endpoint's own wMaxPacketSize makes one transfer
+// complete per packet, which is the granularity the device actually writes at.
+// High-speed devices are unaffected: their mps is 512, so the request is
+// unchanged.
 static void umph_prep_in_read(umph_interface_t* p_ump)
 {
   if (!p_ump->ep_in) return;
 
-  TU_VERIFY(tu_fifo_remaining(&p_ump->rx_ff) >= sizeof(p_ump->ep_in_buf), );
+  tusb_desc_endpoint_t const* desc_ep =
+      (p_ump->alt_setting == 1) ? &p_ump->desc_ep_in1 : &p_ump->desc_ep_in0;
+
+  uint16_t req = (uint16_t) sizeof(p_ump->ep_in_buf);
+  if (desc_ep->bLength)
+  {
+    const uint16_t mps = (uint16_t) (tu_le16toh(desc_ep->wMaxPacketSize) & 0x07FF);
+    if (mps && mps < req) req = mps;
+  }
+
+  TU_VERIFY(tu_fifo_remaining(&p_ump->rx_ff) >= req, );
   TU_VERIFY(usbh_edpt_claim(p_ump->daddr, p_ump->ep_in), );
 
-  if (tu_fifo_remaining(&p_ump->rx_ff) >= sizeof(p_ump->ep_in_buf))
+  if (tu_fifo_remaining(&p_ump->rx_ff) >= req)
   {
-    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, sizeof(p_ump->ep_in_buf));
+    usbh_edpt_xfer(p_ump->daddr, p_ump->ep_in, p_ump->ep_in_buf, req);
   }
   else
   {
@@ -1057,6 +1093,33 @@ uint16_t tuh_ump_get_bcd_msc(uint8_t daddr, uint8_t itf_num)
   umph_interface_t* p_ump = find_itf(daddr, itf_num);
   if (!p_ump) return 0;
   return (p_ump->alt_setting == 1) ? p_ump->bcdMSC1 : p_ump->bcdMSC0;
+}
+
+bool tuh_ump_get_ep_in_desc(uint8_t daddr, uint8_t itf_num,
+                            tusb_desc_endpoint_t* desc_out)
+{
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  if (!p_ump || !desc_out) return false;
+  // Same selection set_config() uses when it calls tuh_edpt_open(), so this
+  // reports the endpoint actually in use rather than whichever alt setting
+  // happened to be parsed last.
+  tusb_desc_endpoint_t const* d =
+      (p_ump->alt_setting == 1) ? &p_ump->desc_ep_in1 : &p_ump->desc_ep_in0;
+  if (!d->bLength) return false;   // no IN endpoint for this alt setting
+  *desc_out = *d;
+  return true;
+}
+
+bool tuh_ump_get_ep_out_desc(uint8_t daddr, uint8_t itf_num,
+                             tusb_desc_endpoint_t* desc_out)
+{
+  umph_interface_t* p_ump = find_itf(daddr, itf_num);
+  if (!p_ump || !desc_out) return false;
+  tusb_desc_endpoint_t const* d =
+      (p_ump->alt_setting == 1) ? &p_ump->desc_ep_out1 : &p_ump->desc_ep_out0;
+  if (!d->bLength) return false;
+  *desc_out = *d;
+  return true;
 }
 
 uint8_t tuh_ump_get_group_terminal_blocks(uint8_t daddr, uint8_t itf_num,

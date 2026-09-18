@@ -137,6 +137,23 @@ uint16_t tuh_ump_get_bcd_msc (uint8_t daddr, uint8_t itf_num);
 uint8_t  tuh_ump_get_group_terminal_blocks(uint8_t daddr, uint8_t itf_num,
                                             midi2_desc_group_terminal_block_t const **gtb_array_out);
 
+// Get the endpoint descriptor the driver actually opened for the currently
+// active alt setting, copied into *desc_out. Returns false (leaving *desc_out
+// untouched) if the interface is unknown or has no endpoint in that direction.
+//
+// The descriptors are captured verbatim during parsing, so this reports what
+// the device really asked for -- bmAttributes (transfer type) and bInterval
+// (polling period) in particular, neither of which is derivable from any other
+// part of this API. Without it, a host that delivers one event every few
+// milliseconds is indistinguishable from a device that only produces one that
+// often, and the difference decides whether anything above this layer can help.
+//
+// Additive: no existing function changes behaviour or signature.
+bool     tuh_ump_get_ep_in_desc (uint8_t daddr, uint8_t itf_num,
+                                 tusb_desc_endpoint_t *desc_out);
+bool     tuh_ump_get_ep_out_desc(uint8_t daddr, uint8_t itf_num,
+                                 tusb_desc_endpoint_t *desc_out);
+
 //--------------------------------------------------------------------+
 // Application Callback API (weak is optional)
 //--------------------------------------------------------------------+
