@@ -581,6 +581,9 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK; // if used, cable num is group block num
 
       uint8_t mtVal = umpPacket.umpData.umpBytes[0] & UMP_MT_MASK;
+#if CFG_UMP_MIDI2_TO_MIDI1
+      bool midi2NoRoom = false;
+#endif
       switch (mtVal)
       {
         case UMP_MT_SYSTEM:  // System Common messages
@@ -771,12 +774,35 @@ static uint16_t tud_ump_write_impl( uint8_t itf, uint32_t *words, uint16_t numWo
           }
           break;
 
+#if CFG_UMP_MIDI2_TO_MIDI1
+        case UMP_MT_MIDI2_CV:
+          // MIDI 2.0 Protocol message to a MIDI 1.0 device: translate (ump.h),
+          // then reformat. Up to four packets (an RPN is four Control
+          // Changes); written all or none, so a sequence is never torn --
+          // without room, stop here and let the caller offer it again.
+          umpWritePacket.wordCount = ump_midi2cv_to_usbmidi1(
+              umpPacket.umpData.umpBytes, cbl_num, umpWritePacket.umpData.umpBytes);
+          if (umpWritePacket.wordCount == 0)
+          {
+            numProcessed += umpPacket.wordCount;   // no MIDI 1.0 equivalent: consumed, dropped
+          }
+          else if (tu_fifo_remaining(&ump->tx_ff) < (uint16_t)(umpWritePacket.wordCount * 4u))
+          {
+            umpWritePacket.wordCount = 0;
+            midi2NoRoom = true;
+          }
+          break;
+#endif
+
         default:
           // Not handled so ignore
           numProcessed += umpPacket.wordCount;    // ignore this UMP packet as corrupted
           umpWritePacket.wordCount = 0;
       }
 
+#if CFG_UMP_MIDI2_TO_MIDI1
+      if (midi2NoRoom) break;
+#endif
       if (umpWritePacket.wordCount)
       {
         numProcessed += umpPacket.wordCount;
@@ -1406,6 +1432,11 @@ tud_USBMIDI1ToUMP(
 void tud_ump_test_set_ep_out(uint8_t itf, uint8_t ep_out)
 {
     _umpd_itf[itf].ep_out = ep_out;
+}
+
+void tud_ump_test_set_ep_in(uint8_t itf, uint8_t ep_in)
+{
+    _umpd_itf[itf].ep_in = ep_in;
 }
 
 uint16_t tud_ump_test_rx_write(uint8_t itf, const uint8_t* data, uint16_t n)

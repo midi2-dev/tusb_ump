@@ -142,6 +142,7 @@ bool     umpd_xfer_cb         (uint8_t rhport, uint8_t edpt_addr, xfer_result_t 
 // received from the USB OUT endpoint.
 //--------------------------------------------------------------------+
 void     tud_ump_test_set_ep_out (uint8_t itf, uint8_t ep_out);
+void     tud_ump_test_set_ep_in  (uint8_t itf, uint8_t ep_in);
 uint16_t tud_ump_test_rx_write   (uint8_t itf, const uint8_t* data, uint16_t n);
 #endif
 

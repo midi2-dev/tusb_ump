@@ -119,6 +119,7 @@ Set these before including `ump_host.h` (typically in `tusb_config.h`):
 | `CFG_TUH_UMP_MAX_GTB` | `8` | Max Group Terminal Block entries parsed/synthesized per interface, bounding memory regardless of what a device claims in its descriptor's `wTotalLength`. |
 | `CFG_TUH_UMP_EP_BUFSIZE` | `64` (FS) / `512` (HS) | Endpoint transfer buffer size. |
 | `CFG_TUH_UMP_RX_BUFSIZE` / `CFG_TUH_UMP_TX_BUFSIZE` | `CFG_TUH_UMP_EP_BUFSIZE` | FIFO sizes for the read/write word pump. |
+| `CFG_UMP_MIDI2_TO_MIDI1` | `1` | On the MIDI 1.0 alternate (Alt Setting 0), translate MIDI 2.0 Channel Voice (MT 4) to MIDI 1.0 instead of dropping it. Applies to the device driver too. |
 
 You'll also need TinyUSB's own host-stack macros set appropriately for your
 target -- `CFG_TUH_ENABLED`, `BOARD_TUH_RHPORT`, `CFG_TUH_HUB` (if devices
@@ -193,8 +194,22 @@ flowchart TD
     J --> M[USB-MIDI1 word emitted]
     K --> M
     M --> I
+    B -->|"MT=4 MIDI 2.0 Channel Voice<br/>(CFG_UMP_MIDI2_TO_MIDI1)"| P["default translation to MIDI 1.0:<br/>values -> top 7 / 14 bits, Note On vel 0 -> 1,<br/>Program Change + Bank Select CC 0/32,<br/>RPN/NRPN -> CC 101/100 or 99/98 + 6/38;<br/>per-note messages dropped"]
+    P --> Q["1-4 USB-MIDI1 words,<br/>all or none"]
     B -->|other| N[drop: not handled]
 ```
+
+A MIDI 1.0 device cannot receive a MIDI 2.0 Channel Voice message (MT 4) as
+such, and without translation a sender using the MIDI 2.0 Protocol reaches it
+with nothing at all. Both drivers therefore apply the MIDI 2.0 Specification's
+default translation (M2-104-UM) on the Alt Setting 0 write path before
+reformatting -- the same helper, `ump_midi2cv_to_usbmidi1()` in `ump.h`, in
+device and host roles. A translation can take up to four USB-MIDI1 words (an
+RPN is four Control Changes); it is written whole or not at all, so a
+controller sequence is never split across a full FIFO. Messages with no MIDI
+1.0 form (per-note controllers, per-note pitch bend, per-note management,
+relative RPN/NRPN) are consumed and dropped. Set `CFG_UMP_MIDI2_TO_MIDI1` to
+`0` for the previous behaviour (MT 4 dropped).
 
 ## Examples
 
@@ -217,7 +232,8 @@ flowchart TD
 [`test/host`](test/host) is a hardware-free regression suite (runs on your
 development machine, not USB host role) for `ump_device.cpp`'s
 legacy-alt-setting conversion paths (buffer-space bounding, byte continuity
-across split reads). Run with `make check`; no cross toolchain needed. There
+across split reads, and the write path's MIDI 2.0 -> MIDI 1.0 translation,
+including all-or-none writing of multi-word translations). Run with `make check`; no cross toolchain needed. There
 is no equivalent native suite for `ump_host.cpp` yet -- it's currently
 validated via [`examples/tusb_ump_host_demo`](examples/tusb_ump_host_demo)
 against real hardware.

@@ -128,6 +128,90 @@
 #endif
 
 //--------------------------------------------------------------------+
+// MIDI 2.0 Channel Voice -> USB MIDI 1.0 (alternate setting 0)
+//--------------------------------------------------------------------+
+// With the USB MIDI 1.0 alternate selected, both drivers reformat MIDI 1.0
+// UMP (MT 1, 2, 3) into USB-MIDI 1.0 event packets. A MIDI 2.0 Channel Voice
+// message (MT 4) has no USB-MIDI 1.0 form, and used to be discarded -- so a
+// MIDI 1.0 device received nothing at all from a sender using the MIDI 2.0
+// Protocol. With this enabled (the default) the drivers apply the MIDI 2.0
+// Specification's default translation (M2-104-UM, "Translation of MIDI 2.0
+// Channel Voice Messages to MIDI 1.0") before reformatting:
+//
+//   Note On/Off, Poly Pressure, Control Change, Channel Pressure: values
+//     scaled down by taking their most significant bits; a Note On whose
+//     velocity scales to 0 is sent with velocity 1, since 0 means Note Off.
+//   Pitch Bend: 32 -> 14 bits.
+//   Program Change: preceded by Bank Select MSB/LSB (CC 0 / CC 32) when the
+//     Bank Valid flag is set.
+//   Registered / Assignable Controller (RPN / NRPN): CC 101/100 or 99/98 to
+//     select, then Data Entry MSB/LSB (CC 6 / CC 38), 14-bit value.
+//   Per-note controllers, per-note pitch bend, per-note management and the
+//     relative RPN/NRPN forms have no MIDI 1.0 equivalent and are dropped.
+//
+// Define CFG_UMP_MIDI2_TO_MIDI1 to 0 to restore the old behaviour (MT 4
+// discarded on the MIDI 1.0 alternate).
+#ifndef CFG_UMP_MIDI2_TO_MIDI1
+  #define CFG_UMP_MIDI2_TO_MIDI1 1
+#endif
+
+/** Translate one MIDI 2.0 Channel Voice UMP into USB-MIDI 1.0 event packets.
+ *
+ * @param ump   the 8-byte UMP in the drivers' internal layout: byte 0 holds
+ *              the MT/group nibbles, byte 1 opcode/channel, bytes 4-7 the data
+ *              word most significant byte first
+ * @param cable USB-MIDI cable number to put in each packet
+ * @param out   16 bytes: up to four 4-byte USB-MIDI 1.0 event packets
+ * @return      the number of packets written, 0 if the message has no MIDI 1.0
+ *              equivalent (the caller consumes and drops it)
+ */
+static inline uint8_t ump_midi2cv_to_usbmidi1(const uint8_t ump[8], uint8_t cable, uint8_t out[16])
+{
+  const uint8_t op  = (uint8_t)(ump[1] >> 4);
+  const uint8_t ch  = (uint8_t)(ump[1] & 0x0f);
+  const uint8_t hi7 = (uint8_t)(ump[4] >> 1);                         // top 7 bits of the data word
+  const uint16_t v14 = (uint16_t)(((uint16_t)ump[4] << 6) | (ump[5] >> 2)); // top 14 bits
+  uint8_t n = 0;
+
+  #define UMP_M1_EMIT(status, d1, d2) do {                              \
+      out[n * 4 + 0] = (uint8_t)((cable << 4) | ((status) >> 4));       \
+      out[n * 4 + 1] = (uint8_t)(status);                               \
+      out[n * 4 + 2] = (uint8_t)((d1) & 0x7f);                          \
+      out[n * 4 + 3] = (uint8_t)((d2) & 0x7f);                          \
+      n++;                                                              \
+    } while (0)
+
+  switch (op)
+  {
+    case 0x9: UMP_M1_EMIT(0x90 | ch, ump[2], hi7 ? hi7 : 1); break;   // Note On (velocity 0 -> 1)
+    case 0x8: UMP_M1_EMIT(0x80 | ch, ump[2], hi7);          break;   // Note Off
+    case 0xA: UMP_M1_EMIT(0xA0 | ch, ump[2], hi7);          break;   // Poly Pressure
+    case 0xB: UMP_M1_EMIT(0xB0 | ch, ump[2], hi7);          break;   // Control Change
+    case 0xD: UMP_M1_EMIT(0xD0 | ch, hi7, 0);               break;   // Channel Pressure
+    case 0xE: UMP_M1_EMIT(0xE0 | ch, v14 & 0x7f, v14 >> 7); break;   // Pitch Bend
+    case 0xC:                                                          // Program Change
+      if (ump[3] & 0x01)                                               // Bank Valid
+      {
+        UMP_M1_EMIT(0xB0 | ch, 0,  ump[6]);                            // Bank Select MSB
+        UMP_M1_EMIT(0xB0 | ch, 32, ump[7]);                            // Bank Select LSB
+      }
+      UMP_M1_EMIT(0xC0 | ch, ump[4], 0);
+      break;
+    case 0x2:                                                          // Registered Controller (RPN)
+    case 0x3:                                                          // Assignable Controller (NRPN)
+      UMP_M1_EMIT(0xB0 | ch, op == 0x2 ? 101 : 99, ump[2]);            // bank
+      UMP_M1_EMIT(0xB0 | ch, op == 0x2 ? 100 : 98, ump[3]);            // index
+      UMP_M1_EMIT(0xB0 | ch, 6,  v14 >> 7);                            // Data Entry MSB
+      UMP_M1_EMIT(0xB0 | ch, 38, v14 & 0x7f);                          // Data Entry LSB
+      break;
+    default:                                                           // no MIDI 1.0 equivalent
+      break;
+  }
+  #undef UMP_M1_EMIT
+  return n;
+}
+
+//--------------------------------------------------------------------+
 // Class Specific Descriptor
 //--------------------------------------------------------------------+
 
