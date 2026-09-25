@@ -955,11 +955,18 @@ static bool umph_USBMIDI1ToUMP(uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMPH_PA
     case MIDI_1_CIN_SYSEX_END_1BYTE: // or single byte System Common
       if ((pBuffer[1] & 0x80) && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
       {
+        // A single-byte System message is one 32-bit UMP word (MT=1), not a
+        // 64-bit SysEx7 packet -- fill and pad it directly rather than
+        // falling into the 2-word SysEx completion path below. Same fix as
+        // ump_device.cpp (93464ab, #23); without it every Timing Clock,
+        // Start/Stop, Active Sensing or Tune Request from a MIDI 1.0 device
+        // was followed by a spurious all-zero word (a UMP NOOP).
         umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
         umpPkt->umpData.umpBytes[1] = pBuffer[1];
-        firstByte = 1;
-        lastByte = 1;
-        goto COMPLETE_1BYTE;
+        umpPkt->umpData.umpBytes[2] = 0x00;
+        umpPkt->umpData.umpBytes[3] = 0x00;
+        umpPkt->wordCount = 1;
+        break;
       }
 
       umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
@@ -977,7 +984,6 @@ static bool umph_USBMIDI1ToUMP(uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMPH_PA
         return false; // should not get here
       }
 
-COMPLETE_1BYTE:
       umpPkt->wordCount = 2;
       copyPos = firstByte;
       for (uint8_t count = 2; count < 8; count++)
