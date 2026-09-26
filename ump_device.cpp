@@ -72,7 +72,14 @@
 // ones. sdkconfig.h exists only in ESP-IDF builds, so it's used to detect
 // the fork and pick the matching call shape below.
 //--------------------------------------------------------------------+
-#if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 1600 && \
+#if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 2100 && !__has_include(<sdkconfig.h>)
+  // Upstream TinyUSB 0.21+: is_isr back on usbd_edpt_xfer, and tu_fifo is a
+  // FIFO of bytes (item_size removed, upstream 4e439889).
+  #define _usbd_edpt_xfer(rh, ep, buf, len) \
+      usbd_edpt_xfer((rh), (ep), (buf), (len), false)
+  #define _tu_fifo_cfg(f, buf, depth, item_sz, ow) \
+      tu_fifo_config((f), (buf), (depth), (ow))
+#elif defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 1600 && \
     TUSB_VERSION_NUMBER < 1700 && !__has_include(<sdkconfig.h>)
   // Upstream TinyUSB 0.16 only (transient: added is_isr, removed item_size)
   #define _usbd_edpt_xfer(rh, ep, buf, len) \

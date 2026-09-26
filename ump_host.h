@@ -180,7 +180,14 @@ TU_ATTR_WEAK void tuh_ump_raw_rx_cb (uint8_t daddr, uint8_t itf_num, uint8_t con
 //--------------------------------------------------------------------+
 bool umph_init       (void);
 bool umph_deinit     (void);
-bool umph_open       (uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const * itf_desc, uint16_t max_len);
+// TinyUSB 0.21 changed a host class driver's open() to return the number of
+// descriptor bytes it claims (upstream ef018e36); earlier versions return bool.
+#if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 2100
+typedef uint16_t umph_open_ret_t;
+#else
+typedef bool umph_open_ret_t;
+#endif
+umph_open_ret_t umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const * itf_desc, uint16_t max_len);
 bool umph_set_config (uint8_t dev_addr, uint8_t itf_num);
 bool umph_xfer_cb    (uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes);
 void umph_close      (uint8_t dev_addr);
