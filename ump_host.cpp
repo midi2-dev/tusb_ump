@@ -1315,6 +1315,9 @@ static uint16_t umph_write_impl(uint8_t daddr, uint8_t itf_num, uint32_t* words,
 
       uint8_t cbl_num = umpPacket.umpData.umpBytes[0] & UMP_GROUP_MASK;
       uint8_t mtVal = umpPacket.umpData.umpBytes[0] & UMP_MT_MASK;
+#if CFG_UMP_MIDI2_TO_MIDI1
+      bool midi2NoRoom = false;
+#endif
       umpWritePacket.wordCount = 0;
 
       switch (mtVal)
@@ -1460,11 +1463,34 @@ static uint16_t umph_write_impl(uint8_t daddr, uint8_t itf_num, uint32_t* words,
           break;
         }
 
+#if CFG_UMP_MIDI2_TO_MIDI1
+        case UMP_MT_MIDI2_CV:
+          // MIDI 2.0 Protocol message to a MIDI 1.0 device: translate (ump.h),
+          // then reformat. Up to four packets (an RPN is four Control
+          // Changes); written all or none, so a sequence is never torn --
+          // without room, stop here and let the caller offer it again.
+          umpWritePacket.wordCount = ump_midi2cv_to_usbmidi1(
+              umpPacket.umpData.umpBytes, cbl_num, umpWritePacket.umpData.umpBytes);
+          if (umpWritePacket.wordCount == 0)
+          {
+            numProcessed += umpPacket.wordCount;   // no MIDI 1.0 equivalent: consumed, dropped
+          }
+          else if (tu_fifo_remaining(&p_ump->tx_ff) < (uint16_t)(umpWritePacket.wordCount * 4u))
+          {
+            umpWritePacket.wordCount = 0;
+            midi2NoRoom = true;
+          }
+          break;
+#endif
+
         default:
           numProcessed += umpPacket.wordCount; // ignore this UMP packet as corrupted
           umpWritePacket.wordCount = 0;
       }
 
+#if CFG_UMP_MIDI2_TO_MIDI1
+      if (midi2NoRoom) break;
+#endif
       if (umpWritePacket.wordCount)
       {
         numProcessed += umpPacket.wordCount;

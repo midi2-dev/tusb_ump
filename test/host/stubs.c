@@ -8,14 +8,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <string.h>
 #include "device/usbd.h"
 #include "ump_device.h"
+
+// Test controls for the write path: what the driver sends on IN endpoints is
+// captured here, and clearing g_test_edpt_free makes the endpoint look busy so
+// written data stays in the TX FIFO (for room/backpressure tests).
+uint8_t  g_test_in_cap[1024];
+uint16_t g_test_in_len    = 0;
+bool     g_test_edpt_free = true;
 
 bool usbd_edpt_claim(uint8_t rhport, uint8_t ep_addr)
 {
   (void) rhport;
   (void) ep_addr;
-  return true;
+  return g_test_edpt_free;
 }
 
 bool usbd_edpt_release(uint8_t rhport, uint8_t ep_addr)
@@ -28,7 +36,10 @@ bool usbd_edpt_release(uint8_t rhport, uint8_t ep_addr)
 bool usbd_edpt_xfer(uint8_t rhport, uint8_t ep_addr, uint8_t *buffer, uint16_t total_bytes)
 {
   (void) rhport;
-  (void) ep_addr;
+  if ((ep_addr & 0x80) && buffer && g_test_in_len + total_bytes <= sizeof(g_test_in_cap)) {
+    memcpy(g_test_in_cap + g_test_in_len, buffer, total_bytes);
+    g_test_in_len += total_bytes;
+  }
   (void) buffer;
   (void) total_bytes;
   return true;
