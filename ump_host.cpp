@@ -955,11 +955,18 @@ static bool umph_USBMIDI1ToUMP(uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMPH_PA
     case MIDI_1_CIN_SYSEX_END_1BYTE: // or single byte System Common
       if ((pBuffer[1] & 0x80) && (pBuffer[1] != MIDI_1_STATUS_SYSEX_END))
       {
+        // A single-byte System message is one 32-bit UMP word (MT=1), not a
+        // 64-bit SysEx7 packet -- fill and pad it directly rather than
+        // falling into the 2-word SysEx completion path below. Same fix as
+        // ump_device.cpp (93464ab, #23); without it every Timing Clock,
+        // Start/Stop, Active Sensing or Tune Request from a MIDI 1.0 device
+        // was followed by a spurious all-zero word (a UMP NOOP).
         umpPkt->umpData.umpBytes[0] = UMP_MT_SYSTEM | cbl_num;
         umpPkt->umpData.umpBytes[1] = pBuffer[1];
-        firstByte = 1;
-        lastByte = 1;
-        goto COMPLETE_1BYTE;
+        umpPkt->umpData.umpBytes[2] = 0x00;
+        umpPkt->umpData.umpBytes[3] = 0x00;
+        umpPkt->wordCount = 1;
+        break;
       }
 
       umpPkt->umpData.umpBytes[0] = UMP_MT_DATA_64 | cbl_num;
@@ -977,7 +984,6 @@ static bool umph_USBMIDI1ToUMP(uint32_t usbMidi1Pkt, bool* pbIsInSysex, PUMPH_PA
         return false; // should not get here
       }
 
-COMPLETE_1BYTE:
       umpPkt->wordCount = 2;
       copyPos = firstByte;
       for (uint8_t count = 2; count < 8; count++)
@@ -1178,14 +1184,38 @@ static uint16_t umph_read_impl(uint8_t daddr, uint8_t itf_num, uint32_t* pkts, u
   {
     // Legacy MIDI1: rx_ff holds raw 4-byte USB-MIDI1 CIN packets; translate
     // to UMP here (lazily, at read time), mirroring ump_device.cpp's
-    // tud_ump_read_impl() alt-0 branch exactly, including the 2-word
-    // headroom (a single CIN packet can expand to a 2-word SysEx7 UMP msg).
-    uint16_t numProcessed = 0;
-    while ((numAvail - numProcessed) >= 2)
+    // tud_ump_read_impl() alt-0 branch.
+    //
+    // Output is bounded by numAvail in OUTPUT words. This loop used to count
+    // input packets instead, so three SysEx CIN packets (2 UMP words each)
+    // wrote 6 words into a 4-word request -- a buffer overflow on every dense
+    // SysEx read. The device driver had the same bug and was fixed in
+    // 48a5d25; peek the next CIN and only require 2 free slots when it
+    // produces a 2-word SysEx7 packet, so 1-word messages still fill the
+    // last slot.
+    while ((numAvail - numRead) >= 1)
     {
+      uint8_t peekBuf[2];
+      if (tu_fifo_peek_n(&p_ump->rx_ff, peekBuf, sizeof(peekBuf)) != sizeof(peekBuf)) break;
+
+      // Mirror umph_USBMIDI1ToUMP()'s reassignment of a single-byte System
+      // message (CIN 0xF, data byte's high bit set), which converts to one
+      // word, not the 2-word SysEx7 completion a literal CIN 0x5 produces.
+      uint8_t code_index = peekBuf[0] & 0x0f;
+      bool isReassignedRealtime = false;
+      if (code_index == MIDI_1_CIN_1BYTE_DATA && (peekBuf[1] & 0x80))
+      {
+        code_index = MIDI_1_CIN_SYSEX_END_1BYTE;
+        isReassignedRealtime = true;
+      }
+      bool needsTwoWords = (code_index == MIDI_1_CIN_SYSEX_START)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_1BYTE && !isReassignedRealtime)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_2BYTE)
+                         || (code_index == MIDI_1_CIN_SYSEX_END_3BYTE);
+      if (needsTwoWords && (numAvail - numRead) < 2) break;
+
       uint32_t readWord;
       if (tu_fifo_read_n(&p_ump->rx_ff, (void*) &readWord, sizeof(uint32_t)) != sizeof(uint32_t)) break;
-      numProcessed++;
 
       if (readWord)
       {
