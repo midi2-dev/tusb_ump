@@ -64,6 +64,26 @@
 #include "ump_host.h"
 
 //--------------------------------------------------------------------+
+// TinyUSB API compatibility (see ump_device.cpp for the device side)
+//
+// Upstream TinyUSB 0.21 changed two host-side APIs this driver uses: a host
+// class driver's open() returns the number of descriptor bytes it claims
+// instead of bool (upstream ef018e36; umph_open_ret_t, ump_host.h), and
+// tu_fifo became a FIFO of bytes with no item_size argument (4e439889).
+// Earlier versions keep their shapes.
+//--------------------------------------------------------------------+
+#if defined(TUSB_VERSION_NUMBER) && TUSB_VERSION_NUMBER >= 2100
+  #define UMPH_OPEN_RETURNS_LEN 1
+  #define umph_fifo_config(f, buf, depth) tu_fifo_config((f), (buf), (depth), false)
+#else
+  #define UMPH_OPEN_RETURNS_LEN 0
+  #define umph_fifo_config(f, buf, depth) tu_fifo_config((f), (buf), (depth), 1, false)
+#endif
+// open()'s result for "claimed drv_len bytes" / "not ours".
+#define UMPH_OPEN_CLAIM(len) ((umph_open_ret_t) (UMPH_OPEN_RETURNS_LEN ? (len) : 1))
+#define UMPH_OPEN_REJECT     ((umph_open_ret_t) 0)
+
+//--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF
 //--------------------------------------------------------------------+
 
@@ -439,11 +459,11 @@ static bool umph_parse_midistreaming(umph_interface_t* p_ump, tusb_desc_interfac
   return true;
 }
 
-bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* itf_desc, uint16_t max_len)
+umph_open_ret_t umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* itf_desc, uint16_t max_len)
 {
   (void) rhport;
 
-  TU_VERIFY(TUSB_CLASS_AUDIO == itf_desc->bInterfaceClass);
+  TU_VERIFY(TUSB_CLASS_AUDIO == itf_desc->bInterfaceClass, UMPH_OPEN_REJECT);
 
   TU_LOG_USBH("UMPH: open daddr=%u itf_num=%u class=%u/%u/%u max_len=%u\r\n",
              dev_addr, itf_desc->bInterfaceNumber, itf_desc->bInterfaceClass,
@@ -462,7 +482,7 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
     }
 
     umph_interface_t* p_ump = alloc_new_itf(dev_addr);
-    TU_ASSERT(p_ump);
+    TU_ASSERT(p_ump, UMPH_OPEN_REJECT);
     p_ump->itf_num_ac = itf_desc->bInterfaceNumber;
 
     // Merged shape (CFG_TUH_MIDI grouping): MIDIStreaming interface follows within max_len
@@ -477,24 +497,24 @@ bool umph_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_interface_t const* it
       }
     }
 
-    return true;
+    return UMPH_OPEN_CLAIM(drv_len);
   }
 
   if ( AUDIO_SUBCLASS_MIDI_STREAMING == itf_desc->bInterfaceSubClass )
   {
     umph_interface_t* p_ump = find_pending_ac_itf(dev_addr, itf_desc->bInterfaceNumber);
     if (!p_ump) p_ump = alloc_new_itf(dev_addr);
-    TU_ASSERT(p_ump);
+    TU_ASSERT(p_ump, UMPH_OPEN_REJECT);
 
     uint16_t drv_len = tu_desc_len(itf_desc);
     uint8_t const* p_desc = tu_desc_next(itf_desc);
     umph_parse_midistreaming(p_ump, itf_desc, &p_desc, &drv_len, max_len);
 
-    return true;
+    return UMPH_OPEN_CLAIM(drv_len);
   }
 
   TU_LOG_USBH("UMPH: open() ignoring unrecognized AUDIO subclass %u\r\n", itf_desc->bInterfaceSubClass);
-  return false;
+  return UMPH_OPEN_REJECT;
 }
 
 //--------------------------------------------------------------------+
@@ -657,8 +677,8 @@ static void umph_finish_mount(umph_interface_t* p_ump)
     p_ump->ep_out = desc_ep_out->bEndpointAddress;
   }
 
-  tu_fifo_config(&p_ump->rx_ff, p_ump->rx_ff_buf, CFG_TUH_UMP_RX_BUFSIZE, 1, false);
-  tu_fifo_config(&p_ump->tx_ff, p_ump->tx_ff_buf, CFG_TUH_UMP_TX_BUFSIZE, 1, false);
+  umph_fifo_config(&p_ump->rx_ff, p_ump->rx_ff_buf, CFG_TUH_UMP_RX_BUFSIZE);
+  umph_fifo_config(&p_ump->tx_ff, p_ump->tx_ff_buf, CFG_TUH_UMP_TX_BUFSIZE);
 
   // Arm the initial IN read so umph_xfer_cb() starts seeing incoming MIDI data.
   umph_prep_in_read(p_ump);
